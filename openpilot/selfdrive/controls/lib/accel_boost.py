@@ -4,6 +4,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
 
 LIFT_GATE_STDS = [-1.0, 2.0]  # less lift if the future plan is behind compared to maintaining current speed, more if ahead
+BRAKE_BOOST = 1.1  # braking gain at speed, faded in from 10 to 20 m/s
 
 
 def get_accel_boost(personality=log.LongitudinalPersonality.standard):
@@ -38,6 +39,11 @@ class AccelBoost:
     gate = np.interp(plan_ahead, LIFT_GATE_STDS, [0.0, 1.0])
     lift = self.lift_filter.update(boost * gate if curve_offset == 0.0 else 0.0)  # no lift while slowing for a curve ahead
 
-    gain = 1.0 + boost if output_a_target_e2e > 0.0 else 1.0  # boost gas only, braking is left to the model
+    if output_a_target_e2e > 0.0:
+      gain = 1.0 + boost
+    elif boost > 0.0:
+      gain = np.interp(v_ego, [10.0, 20.0], [1.0, BRAKE_BOOST])  # brake a little harder at speed, relaxed is left to the model
+    else:
+      gain = 1.0
     self.total_boost = output_a_target_e2e * (gain - 1.0) + lift
     return output_a_target_e2e + self.total_boost
