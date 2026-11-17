@@ -190,11 +190,13 @@ def cached_scenarios(cache_dir: Path, routes=test_routes, build: Callable = buil
     except Exception:
       pass
 
-  scenarios, gaps = build(routes)
+  data = pickle.dumps(build(routes))
   cache_dir.mkdir(parents=True, exist_ok=True)
   # write whole or not at all, runs share the cache dir
   fd, tmp = tempfile.mkstemp(dir=cache_dir)
   with os.fdopen(fd, "wb") as f:
-    pickle.dump((scenarios, gaps), f)
+    f.write(data)
   os.replace(tmp, path)
+  # pickling marks a CP written, so hand back the same thing a cache hit does
+  scenarios, gaps = pickle.loads(data)
   return scenarios, gaps
