@@ -86,7 +86,8 @@ class TestOracle(unittest.TestCase):
     self.assertIn(f"TX 0x{self.recording[i].can[0].address:x} ", mismatches[0])
 
   def test_forwarded_echo_ignored(self):
-    addr, bus, length = self.commands[0]
+    # an address libsafety blocks, so it would show as a mismatch if it counted as a command
+    addr, bus, length = self.commands[-1]
     msgs = self.recording + [can_msg('can', 0.9, [(addr, bytes(length), bus + 128)])]
     self.assertEqual(check_commands(msgs, self.mode, 0), [])
 
@@ -106,6 +107,30 @@ class TestOracle(unittest.TestCase):
     # libsafety has no getter, run_safety leaves its library loaded so the setup can be read back
     run_safety(heartbeat_recording(7.5, alt_exp=16), ALL_OUTPUT, 0)
     self.assertEqual(libsafety_py.libsafety.safety_a.setup.alternative_experience, 16)
+
+  def test_controls_allowed_sampling(self):
+    # no heartbeat, so libsafety drops controls at its third tick, the panda's sample just after still shows them
+    msgs = [can_msg('can', 0., [])]
+    for t, allowed in ((2.5, True), (3.2, True), (3.7, False), (4.2, False)):
+      ps = new_message('pandaStates', 1)
+      ps.pandaStates[0].controlsAllowed = allowed
+      ps.logMonoTime = int(t * 1e9)
+      msgs.append(ps)
+    self.assertEqual(check_state(msgs, ALL_OUTPUT, 0), [])
+
+  def test_rx_invalid_boundary_skew(self):
+    # libsafety rejects an RX frame at 0.6 s, the panda's sample at 0.5 s already counted it
+    safety = load_libsafety()
+    assert safety.set_safety_hooks(self.mode, 0) == 0
+    rx = safety.safety_a.setup.current_safety_config.rx_checks[0].msg[0]
+    msgs = [can_msg('can', 0., []), can_msg('can', 0.6, [(rx.addr, bytes(rx.len), rx.bus)])]
+    for t, rx_invalid in ((0.25, 0), (0.5, 1), (0.75, 1), (0.9, 1)):
+      ps = new_message('pandaStates', 1)
+      ps.pandaStates[0].safetyRxInvalid = rx_invalid
+      ps.logMonoTime = int(t * 1e9)
+      msgs.append(ps)
+    self.assertEqual(len(run_safety(msgs, self.mode, 0).rx_rejected), 1)
+    self.assertEqual(check_state(msgs, self.mode, 0), [])
 
 
 if __name__ == "__main__":

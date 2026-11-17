@@ -1,4 +1,5 @@
 import atexit
+import bisect
 import os
 import shutil
 import tempfile
@@ -23,6 +24,8 @@ class SafetyRun:
   samples: list[tuple[float, bool, bool, int, int]] = field(default_factory=list)
   rx_rejected: list[tuple[float, int, int]] = field(default_factory=list)
   rx_checks_invalid_at: float | None = None
+  # libsafety's controls_allowed from the first can message on, (t, value) at each change
+  controls_allowed: list[tuple[float, bool]] = field(default_factory=list)
 
 
 @cache
@@ -87,6 +90,12 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
   alt_exp = next((int(ps.alternativeExperience) for m in msgs if m.logMonoTime < first and (ps := _panda_state(m)) is not None), 0)
   safety.set_alternative_experience(alt_exp)
 
+  def note_controls(t: float) -> None:
+    allowed = bool(safety.get_controls_allowed())
+    if not run.controls_allowed or run.controls_allowed[-1][1] != allowed:
+      run.controls_allowed.append((t, allowed))
+
+  note_controls(0.)
   pending: Counter[tuple[int, int, bytes]] = Counter()
   # the timer crosses its first whole second one second after the first message
   next_tick = 1
@@ -101,6 +110,7 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
       safety.safety_heartbeat_check()
       if run.rx_checks_invalid_at is None and safety.safety_a.state.safety_rx_checks_invalid:
         run.rx_checks_invalid_at = float(next_tick)
+      note_controls(float(next_tick))
       next_tick += 1
 
     if which == heartbeat_source:
@@ -124,6 +134,7 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
           safety.safety_fwd_hook(c.src, c.address)
           if not safety.safety_rx_hook(libsafety_py.make_CANPacket(c.address, c.src, c.dat)):
             run.rx_rejected.append((t, c.address, c.src))
+          note_controls(t)
     elif (ps := _panda_state(m)) is not None:
       if ps.alternativeExperience != alt_exp:
         alt_exp = int(ps.alternativeExperience)
@@ -142,13 +153,24 @@ def command_mismatches(run: SafetyRun) -> list[str]:
   return [f"t={t:.2f} TX 0x{addr:x} bus {bus}: panda {_allowed(a)}, libsafety {_allowed(b)}" for t, addr, bus, a, b in run.commands if a != b]
 
 
+def _held(run: SafetyRun, start: float, end: float) -> set[bool]:
+  # every value libsafety's controls_allowed had during (start, end]
+  times = [t for t, _ in run.controls_allowed]
+  i, j = bisect.bisect_right(times, start), bisect.bisect_right(times, end)
+  return {v for _, v in run.controls_allowed[max(i - 1, 0):j]}
+
+
 def state_mismatches(run: SafetyRun, msgs: list) -> list[str]:
   engaged = _engaged(msgs)
   changes = [t for (_, prev), (t, now) in zip(engaged, engaged[1:], strict=False) if prev != now]
   intervals = [(tc, tc + HEARTBEAT_LAG + 1) for tc in changes]
   mismatches = []
+  prev = float('-inf')
   for t, panda, lib, _, _ in run.samples:
-    if panda == lib:
+    start, prev = prev, t
+    # pandad reads the panda's health and its CAN in separate loops, so a sample shows the panda at some moment
+    # since the previous sample, accepted if libsafety held the panda's value at any point since then
+    if panda in _held(run, start, t):
       continue
     # the panda and libsafety tick at different moments, so after openpilot engages or disengages they may drop
     # controls up to HEARTBEAT_LAG + 1 ticks apart, accepted if libsafety reaches the panda's value within that interval
@@ -156,9 +178,17 @@ def state_mismatches(run: SafetyRun, msgs: list) -> list[str]:
       continue
     mismatches.append(f"t={t:.2f} controls_allowed: panda {panda}, libsafety {lib}")
 
-  for (t0, _, _, panda0, lib0), (t, _, _, panda, lib) in zip(run.samples, run.samples[1:], strict=False):
-    if panda - panda0 != lib - lib0:
-      mismatches.append(f"t={t:.2f} RX invalid since t={t0:.2f}: panda {panda - panda0}, libsafety {lib - lib0}")
+  if not run.samples:
+    return mismatches
+  t0, _, _, panda0, lib0 = run.samples[0]
+  counts = [(t, panda - panda0, lib - lib0) for t, _, _, panda, lib in run.samples]
+  reported = 0
+  # the same health and CAN loop skew moves a rejected frame into a neighboring sample, so a difference counts
+  # only if it is still there at the next sample, reported once where it first appeared
+  for (t, panda, lib), (_, next_panda, next_lib) in zip(counts, counts[1:], strict=False):
+    if panda - lib != reported and next_panda - next_lib == panda - lib:
+      reported = panda - lib
+      mismatches.append(f"t={t:.2f} RX invalid since t={t0:.2f}: panda {panda}, libsafety {lib}")
   return mismatches
 
 
