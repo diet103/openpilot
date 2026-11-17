@@ -4,7 +4,7 @@ from pathlib import Path
 from opendbc.car.tests.routes import CarTestRoute
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, pick_window
+from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, engaged_samples, pick_window
 
 ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")
 ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")
@@ -14,12 +14,18 @@ def samples(*stretches, end=70):
   return [(float(t), any(a <= t < b for a, b in stretches)) for t in range(end)]
 
 
-def panda_states(allowed_by_second):
-  msgs = []
+def can_start(t=0.):
+  msg = new_message('can', 0)
+  msg.logMonoTime = int(t * 1e9)
+  return msg
+
+
+def panda_states(allowed_by_second, start=0., can_at=0.):
+  msgs = [can_start(can_at)]
   for i, allowed in enumerate(allowed_by_second):
     msg = new_message('pandaStates', 1)
     msg.pandaStates[0].controlsAllowed = allowed
-    msg.logMonoTime = int(i * 1e9)
+    msg.logMonoTime = int((start + i) * 1e9)
     msgs.append(msg)
   return msgs
 
@@ -78,6 +84,11 @@ class TestScenario(unittest.TestCase):
     self.assertEqual(scenarios, [])
     self.assertIn("no panda state logged", gaps[0])
     self.assertIn("CAR_A", gaps[0])
+
+  def test_times_from_first_can(self):
+    early = panda_states([False], start=100.)[1:]
+    engaged = panda_states([20 <= i < 60 for i in range(70)], start=200., can_at=200.)
+    self.assertEqual(pick_window(engaged_samples(early + engaged)), Window(15., 45.))
 
   def test_gap_when_pair_fails(self):
     scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([True] * 20)}), fake_pair({ROUTE_A.route: KeyError("x")}))

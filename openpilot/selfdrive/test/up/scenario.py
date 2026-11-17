@@ -33,9 +33,14 @@ class Scenario:
 def engaged_samples(msgs: Iterable) -> list[tuple[float, bool]]:
   samples = []
   first = None
+  msgs = list(msgs)
   for m in msgs:
-    if first is None:
+    if m.which() == 'can':
       first = m.logMonoTime
+      break
+  if first is None:
+    return []
+  for m in msgs:
     which = m.which()
     if which == 'pandaStates' and len(m.pandaStates):
       allowed = m.pandaStates[0].controlsAllowed
