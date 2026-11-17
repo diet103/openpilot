@@ -1,22 +1,18 @@
-import argparse
 import tempfile
 import unittest
-from collections import Counter
-from functools import partial
 from pathlib import Path
 from unittest import mock
 
 import zstandard as zstd
 
 from opendbc.car import structs
-from opendbc.car.car_helpers import interfaces
 from opendbc.car.tests.routes import CarTestRoute, routes
 from opendbc.car.tests.test_models import get_cached_segment
 from opendbc.car.toyota.values import CAR as TOYOTA
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.scenario import (Report, Scenario, Window, build_candidates, build_scenarios, can_span, car_params, engaged_samples,
-                                                  load_route, parse_budget, pick_window, run_scenarios, safety_pair, scenario_report)
+from openpilot.selfdrive.test.up.scenario import (Scenario, Window, build_candidates, build_scenarios, can_span, car_params, engaged_samples, load_log,
+                                                  load_route, pick_window, safety_pair)
 
 ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")
 ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")
@@ -135,8 +131,10 @@ class TestScenario(unittest.TestCase):
       path.write_bytes(zstd.compress(b"".join(m.to_bytes() for m in msgs)))
       with mock.patch("openpilot.selfdrive.test.up.scenario.get_cached_segment", return_value=path):
         segment, CP, loaded = load_route(CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A", 0), params=lambda r, p: fake_car_params(1, 2))
+        logged = load_log(Scenario("aaaa|2024-01-01--00-00-00", 0, "CAR_A", 1, 2, Window(0., 30.), CP))
     self.assertEqual((segment, safety_pair(CP)), (0, (1, 2)))
     self.assertEqual([m.logMonoTime for m in loaded], [int(1e9), int(2e9)])
+    self.assertEqual([m.logMonoTime for m in logged], [int(1e9), int(2e9)])
 
   def test_car_params_signed_url_name(self):
     route = next(r for r in routes if r.car_model == TOYOTA.TOYOTA_COROLLA_TSS2)
@@ -150,44 +148,11 @@ class TestScenario(unittest.TestCase):
       CP = car_params(route, mangled)
     self.assertEqual(CP.to_bytes(), car_params(route, path).to_bytes())
 
-  def test_parse_budget(self):
-    self.assertEqual(parse_budget("230,130,60"), {0: 230., 1: 130., 2: 60.})
-    for bad in ("230,130", "230,130,60,10", "230,x,60", "", "230,0,60"):
-      with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
-        parse_budget(bad)
-
-  def test_scenario_error_is_a_gap(self):
-    platform = str(TOYOTA.TOYOTA_COROLLA_TSS2)
-    good = interfaces[platform].get_non_essential_params(platform)
-    bad = good.copy()
-    bad.safetyConfigs[-1].safetyModel = 0xFFFF
-    routes = [CarTestRoute(f"{c}|2024-01-01--00-00-00", platform) for c in "ab"]
-    scenarios = [Scenario(r.route, 0, platform, *safety_pair(CP), Window(0., 30.), CP) for r, CP in zip(routes, (bad, good), strict=True)]
-    msgs = [can_start(i * 0.01).as_reader() for i in range(3100)]
-    report = partial(scenario_report, load=lambda route: (0, good, msgs))
-    candidates = {(i, 0): [sc] for i, sc in enumerate(scenarios)}
-    lines, gaps, _ = run_scenarios(candidates, routes, {0: 230., 1: 130., 2: 60.}, report=report)
-    self.assertEqual(len(gaps), 1, gaps)
-    self.assertTrue(gaps[0].startswith(f"{platform} {routes[0].route}: ValueError("), gaps)
-    self.assertEqual(len(lines), 1)
-    self.assertIn(routes[1].route, lines[0])
-
-  def test_lane_budget_tries_next_route(self):
+  def test_candidates_in_routes_order(self):
     engaged = panda_states([False] * 10 + [True] * 30)
     candidates, gaps = build_candidates([ROUTE_A, ROUTE_B], fake_load({ROUTE_A.route: engaged, ROUTE_B.route: engaged}))
     self.assertEqual([s.route for s in candidates[(1, 2)]], [ROUTE_A.route, ROUTE_B.route])
-
-    def report(over):
-      def fake(scenario, route, budget):
-        if scenario.route in over:
-          return Report(None, f"mode 1 param 2: lane budget: {scenario.route}", Counter(), retry=True)
-        return Report(f"line {scenario.route}", None, Counter())
-      return fake
-
-    lines, gaps, _ = run_scenarios(candidates, [ROUTE_A, ROUTE_B], {}, report=report({ROUTE_A.route}))
-    self.assertEqual((lines, gaps), ([f"line {ROUTE_B.route}"], []))
-    lines, gaps, _ = run_scenarios(candidates, [ROUTE_A, ROUTE_B], {}, report=report({ROUTE_A.route, ROUTE_B.route}))
-    self.assertEqual((lines, gaps), ([], [f"mode 1 param 2: lane budget: {ROUTE_B.route}"]))
+    self.assertEqual(gaps, [])
 
 
 if __name__ == "__main__":

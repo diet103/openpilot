@@ -1,6 +1,7 @@
 import math
 import unittest
 from collections import Counter
+from unittest import mock
 
 from opendbc.can.dbc import DBC, SignalType
 from opendbc.can.packer import CANPacker
@@ -11,10 +12,11 @@ from opendbc.car.toyota.values import CAR as TOYOTA, ToyotaSafetyFlags
 
 from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.test.up.oracle import load_libsafety
-from openpilot.selfdrive.test.up.replay import BUDGET, DT, _dbcs, _values, needed_messages, over_budget, thin, validate, window_frames
-from openpilot.selfdrive.test.up.scenario import Window, load_route, safety_pair
+from openpilot.selfdrive.test.up.replay import (BUDGET, DT, Replay, _dbcs, _values, build_replay, needed_frames, needed_messages, over_budget, pick_replay,
+                                                thin, validate, window_frames)
+from openpilot.selfdrive.test.up.scenario import Scenario, Window, load_route, safety_pair
 
-SECONDS = 20
+WINDOW = Window(5., 25.)
 
 
 def can_msg(t, frames):
@@ -47,24 +49,24 @@ def rx_checks(mode, param):
   return {(cfg.rx_checks[i].msg[0].bus, cfg.rx_checks[i].msg[0].addr) for i in range(cfg.rx_checks_len)}
 
 
-def route_frames(car):
+def route_log(car):
   route = next(r for r in routes if r.car_model == car)
   try:
     _, CP, msgs = load_route(route)
   except OSError as e:
     raise unittest.SkipTest(f"{route.route} not cached: {e}") from e
-  return CP, window_frames(msgs, Window(5., 5. + SECONDS))
+  return CP, msgs
+
+
+def route_frames(car):
+  CP, msgs = route_log(car)
+  return CP, window_frames(msgs, WINDOW)
 
 
 def plain_cp():
   # the synthetic messages are in none of this car's DBCs
   platform = str(TOYOTA.TOYOTA_COROLLA_TSS2)
   return interfaces[platform].get_non_essential_params(platform)
-
-
-def needed_frames(CP, frames):
-  needed = needed_messages(CP, frames)
-  return [[f for f in frame if (f[2], f[0]) in needed] for frame in frames]
 
 
 def with_param(CP, param):
@@ -168,9 +170,7 @@ class TestReplay(unittest.TestCase):
   def test_validate_clean(self):
     CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
     self.assertEqual(validate(CP, frames), [])
-    needed = needed_messages(CP, frames)
-    frames = [[f for f in frame if (f[2], f[0]) in needed] for frame in frames]
-    self.assertEqual(validate(CP, frames), [])
+    self.assertEqual(validate(CP, needed_frames(CP, frames)), [])
 
   def test_thin_repacks_counters(self):
     CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
@@ -206,9 +206,37 @@ class TestReplay(unittest.TestCase):
     self.assertGreater(compared, 0)
     self.assertGreater(with_counter, 0)
 
-  def test_validate_thinned_clean(self):
-    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
-    self.assertEqual(validate(CP, thin(CP, needed_frames(CP, frames), BUDGET)), [])
+  def test_build_replay(self):
+    CP, msgs = route_log(TOYOTA.TOYOTA_COROLLA_TSS2)
+    replay = build_replay(CP, msgs, WINDOW, BUDGET)
+    self.assertEqual(replay, Replay(thin(CP, needed_frames(CP, window_frames(msgs, WINDOW)), BUDGET), [], []))
+    # only thinning to these rates breaks the replay, so the lanes can't carry it
+    replay = build_replay(CP, msgs, WINDOW, {0: 40.})
+    self.assertGreater(len(replay.problems), 0)
+    self.assertEqual(replay.lane_problems, replay.problems)
+
+  def test_pick_replay_tries_next_route(self):
+    a, b = (Scenario(f"{c}|2024-01-01--00-00-00", 0, "CAR", 1, 2, WINDOW, plain_cp()) for c in "ab")
+
+    def build(over):
+      def fake(CP, msgs, window, budget):
+        return Replay([], [], [f"lane {msgs}"] if msgs in over else [])
+      return fake
+
+    def load(s):
+      return s.route
+
+    with mock.patch("openpilot.selfdrive.test.up.replay.build_replay", build({a.route})):
+      s, msgs, replay = pick_replay([a, b], BUDGET, load)
+    self.assertIs(s, b)
+    self.assertEqual((msgs, replay.lane_problems), (b.route, []))
+    with mock.patch("openpilot.selfdrive.test.up.replay.build_replay", build({a.route, b.route})):
+      s, _, replay = pick_replay([a, b], BUDGET, load)
+    self.assertIs(s, b)
+    self.assertEqual(replay.lane_problems, [f"lane {b.route}"])
+    with mock.patch("openpilot.selfdrive.test.up.replay.build_replay", build(set())):
+      s, _, _ = pick_replay([a, b], BUDGET, load)
+    self.assertIs(s, a)
 
 
 if __name__ == "__main__":

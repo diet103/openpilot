@@ -1,6 +1,7 @@
 import math
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
 from opendbc.can.dbc import DBC, Msg, SignalType
 from opendbc.can.packer import CANPacker
@@ -12,7 +13,7 @@ from opendbc.car.car_helpers import interfaces
 from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.pandad import can_capnp_to_list
 from openpilot.selfdrive.test.up.oracle import PANDA_BUSES, load_libsafety, run_safety
-from openpilot.selfdrive.test.up.scenario import Window, safety_pair
+from openpilot.selfdrive.test.up.scenario import Scenario, Window, load_log, safety_pair
 
 # the UP's can_replay frame period
 DT = 0.01
@@ -67,6 +68,11 @@ def needed_messages(CP: structs.CarParams, frames: list[Frame]) -> set[tuple[int
   if radar.rcp is not None:
     parsers.append(radar.rcp)
   return {(p.bus, addr) for p in parsers for addr in p.message_states} | _rx_checks(CP).keys()
+
+
+def needed_frames(CP: structs.CarParams, frames: list[Frame]) -> list[Frame]:
+  needed = needed_messages(CP, frames)
+  return [[f for f in frame if (f[2], f[0]) in needed] for frame in frames]
 
 
 def _rx_checks(CP: structs.CarParams) -> dict[tuple[int, int], bool]:
@@ -200,3 +206,35 @@ def _invalid(car) -> list[str]:
       if st.counter_fail >= MAX_BAD_COUNTER or not st.valid(p._last_update_nanos, bus_timeout):
         invalid.append(f"0x{addr:x} bus {p.bus}")
   return invalid
+
+
+@dataclass
+class Replay:
+  # what a station sends, one frame per DT
+  frames: list[Frame]
+  # what validate finds wrong with it
+  problems: list[str]
+  # why a station's lanes can't carry it, empty if they can
+  lane_problems: list[str]
+
+
+def build_replay(CP: structs.CarParams, msgs: list, window: Window, budget: dict[int, float]) -> Replay:
+  needed = needed_frames(CP, window_frames(msgs, window))
+  frames = thin(CP, needed, budget)
+  problems = validate(CP, frames)
+  # a replay over the lanes' rate, or one only thinning breaks, can't run on the station
+  lane_problems = over_budget(frames, budget)
+  if not lane_problems and problems and not validate(CP, needed):
+    lane_problems = problems
+  return Replay(frames, problems, lane_problems)
+
+
+def pick_replay(candidates: list[Scenario], budget: dict[int, float],
+                load: Callable[[Scenario], list] = load_log) -> tuple[Scenario, list, Replay]:
+  # a pair's scenarios in routes order, the first whose replay fits the station's lanes, or else the last
+  for s in candidates:
+    msgs = load(s)
+    replay = build_replay(s.CP, msgs, s.window, budget)
+    if not replay.lane_problems:
+      break
+  return s, msgs, replay
