@@ -67,7 +67,11 @@ def needed_messages(CP: structs.CarParams, frames: list[Frame]) -> set[tuple[int
   parsers = [p for p in car.can_parsers.values() if p is not None]
   if radar.rcp is not None:
     parsers.append(radar.rcp)
-  return {(p.bus, addr) for p in parsers for addr in p.message_states} | _rx_checks(CP).keys()
+  needed = set(_rx_checks(CP))
+  for p in parsers:
+    for addr in p.message_states:
+      needed.add((p.bus, addr))
+  return needed
 
 
 def needed_frames(CP: structs.CarParams, frames: list[Frame]) -> list[Frame]:
@@ -82,7 +86,12 @@ def _rx_checks(CP: structs.CarParams) -> dict[tuple[int, int], bool]:
   if safety.set_safety_hooks(mode, param) != 0:
     raise ValueError(f"libsafety has no safety mode {mode} param {param}")
   cfg = safety.safety_a.setup.current_safety_config
-  return {(m.bus, m.addr): m.max_counter > 0 and not m.ignore_counter for i in range(cfg.rx_checks_len) for m in cfg.rx_checks[i].msg if m.addr}
+  checks = {}
+  for i in range(cfg.rx_checks_len):
+    for m in cfg.rx_checks[i].msg:
+      if m.addr:
+        checks[(m.bus, m.addr)] = m.max_counter > 0 and not m.ignore_counter
+  return checks
 
 
 def _dbcs(CP: structs.CarParams) -> dict[tuple[int, int], str]:
@@ -121,7 +130,11 @@ def _values(msg: Msg, dat: bytes) -> dict[str, float]:
 def thin(CP: structs.CarParams, frames: list[Frame], budget: dict[int, float]) -> list[Frame]:
   seconds = len(frames) * DT
   load = Counter(bus for f in frames for _, _, bus in f)
-  keep = {bus: max(1, math.ceil(load[bus] / seconds / rate)) for bus, rate in budget.items() if load[bus]}
+  # every k-th frame of each message on a bus
+  keep = {}
+  for bus, rate in budget.items():
+    if load[bus]:
+      keep[bus] = max(1, math.ceil(load[bus] / seconds / rate))
   dbcs = _dbcs(CP)
   parsed = {name: DBC(name) for name in set(dbcs.values())}
   rx_checks = _rx_checks(CP)
@@ -138,8 +151,11 @@ def thin(CP: structs.CarParams, frames: list[Frame], budget: dict[int, float]) -
       dbc = dbcs.get((bus, addr))
       msg = parsed[dbc].addr_to_msg[addr] if dbc is not None else None
       # the panda checks this message and no DBC can repack it or its counter, so it keeps every frame
-      if (bus, addr) in rx_checks and (msg is None or (rx_checks[(bus, addr)] and not any(_is_counter(sig) for sig in msg.sigs.values()))):
-        k = 1
+      if (bus, addr) in rx_checks:
+        if msg is None:
+          k = 1
+        elif rx_checks[(bus, addr)] and not any(_is_counter(sig) for sig in msg.sigs.values()):
+          k = 1
       if n % k:
         continue
       # a kept frame skips k - 1 counter steps, repack it so the counter and checksum stay consecutive
@@ -154,7 +170,11 @@ def thin(CP: structs.CarParams, frames: list[Frame], budget: dict[int, float]) -
 def over_budget(frames: list[Frame], budget: dict[int, float]) -> list[str]:
   seconds = len(frames) * DT
   load = Counter(bus for f in frames for _, _, bus in f)
-  return [f"bus {bus} {load[bus] / seconds:.0f} frames/s > {rate:.0f}" for bus, rate in sorted(budget.items()) if load[bus] / seconds > rate]
+  over = []
+  for bus, rate in sorted(budget.items()):
+    if load[bus] / seconds > rate:
+      over.append(f"bus {bus} {load[bus] / seconds:.0f} frames/s > {rate:.0f}")
+  return over
 
 
 def validate(CP: structs.CarParams, frames: list[Frame]) -> list[str]:

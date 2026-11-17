@@ -65,7 +65,11 @@ def _engaged(msgs: list) -> list[tuple[float, bool]]:
   if first is None:
     return []
   source = _heartbeat_source(msgs)
-  return [((m.logMonoTime - first) / 1e9, _enabled(m)) for m in sorted(msgs, key=lambda m: m.logMonoTime) if m.which() == source]
+  engaged = []
+  for m in sorted(msgs, key=lambda m: m.logMonoTime):
+    if m.which() == source:
+      engaged.append(((m.logMonoTime - first) / 1e9, _enabled(m)))
+  return engaged
 
 
 def _panda_state(m):
@@ -74,6 +78,17 @@ def _panda_state(m):
   if m.which() == 'pandaStateDEPRECATED':
     return m.pandaStateDEPRECATED
   return None
+
+
+def _first_alternative_experience(msgs: list, first: int) -> int:
+  # the panda's own alternative experience, as it logged it before the first can message
+  for m in msgs:
+    if m.logMonoTime >= first:
+      break
+    ps = _panda_state(m)
+    if ps is not None:
+      return int(ps.alternativeExperience)
+  return 0
 
 
 def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
@@ -87,8 +102,7 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
   if safety.set_safety_hooks(mode, param) != 0:
     raise ValueError(f"libsafety has no safety mode {mode} param {param}")
   heartbeat_source = _heartbeat_source(msgs)
-  # the panda's own alternative experience, as it logged it before the first can message
-  alt_exp = next((int(ps.alternativeExperience) for m in msgs if m.logMonoTime < first and (ps := _panda_state(m)) is not None), 0)
+  alt_exp = _first_alternative_experience(msgs, first)
   safety.set_alternative_experience(alt_exp)
 
   def note_controls(t: float) -> None:
@@ -157,7 +171,11 @@ def _allowed(a: bool) -> str:
 
 
 def command_mismatches(run: SafetyRun) -> list[str]:
-  return [f"t={t:.2f} TX 0x{addr:x} bus {bus}: panda {_allowed(a)}, libsafety {_allowed(b)}" for t, addr, bus, a, b in run.commands if a != b]
+  mismatches = []
+  for t, addr, bus, panda, lib in run.commands:
+    if panda != lib:
+      mismatches.append(f"t={t:.2f} TX 0x{addr:x} bus {bus}: panda {_allowed(panda)}, libsafety {_allowed(lib)}")
+  return mismatches
 
 
 def _held(run: SafetyRun, start: float, end: float) -> set[bool]:
@@ -167,10 +185,23 @@ def _held(run: SafetyRun, start: float, end: float) -> set[bool]:
   return {v for _, v in run.controls_allowed[max(i - 1, 0):j]}
 
 
+def _reached(run: SafetyRun, panda: bool, t: float, intervals: list[tuple[float, float]]) -> bool:
+  # libsafety is sampled at the panda's value within an interval around t
+  for start, end in intervals:
+    if not start <= t <= end:
+      continue
+    for ts, _, lib, _, _ in run.samples:
+      if start <= ts <= end and lib == panda:
+        return True
+  return False
+
+
 def state_mismatches(run: SafetyRun, msgs: list) -> list[str]:
   engaged = _engaged(msgs)
-  changes = [t for (_, prev), (t, now) in zip(engaged, engaged[1:], strict=False) if prev != now]
-  intervals = [(tc, tc + HEARTBEAT_LAG + 1) for tc in changes]
+  intervals = []
+  for (_, before), (t, now) in zip(engaged, engaged[1:], strict=False):
+    if before != now:
+      intervals.append((t, t + HEARTBEAT_LAG + 1))
   mismatches = []
   prev = float('-inf')
   for t, panda, lib, _, _ in run.samples:
@@ -181,7 +212,7 @@ def state_mismatches(run: SafetyRun, msgs: list) -> list[str]:
       continue
     # the panda and libsafety tick at different moments, so after openpilot engages or disengages they may drop
     # controls up to HEARTBEAT_LAG + 1 ticks apart, accepted if libsafety reaches the panda's value within that interval
-    if any(start <= t <= end and any(start <= ts <= end and v == panda for ts, _, v, _, _ in run.samples) for start, end in intervals):
+    if _reached(run, panda, t, intervals):
       continue
     mismatches.append(f"t={t:.2f} controls_allowed: panda {panda}, libsafety {lib}")
 
