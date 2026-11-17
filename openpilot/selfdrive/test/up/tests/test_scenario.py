@@ -1,8 +1,8 @@
 import argparse
 import tempfile
+import unittest
 from collections import Counter
 from functools import partial
-import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -138,7 +138,6 @@ class TestScenario(unittest.TestCase):
     self.assertEqual((segment, safety_pair(CP)), (0, (1, 2)))
     self.assertEqual([m.logMonoTime for m in loaded], [int(1e9), int(2e9)])
 
-
   def test_car_params_signed_url_name(self):
     route = next(r for r in routes if r.car_model == TOYOTA.TOYOTA_COROLLA_TSS2)
     try:
@@ -189,6 +188,7 @@ class TestScenario(unittest.TestCase):
     self.assertEqual((lines, gaps), ([f"line {ROUTE_B.route}"], []))
     lines, gaps, _ = run_scenarios(candidates, [ROUTE_A, ROUTE_B], {}, report=report({ROUTE_A.route, ROUTE_B.route}))
     self.assertEqual((lines, gaps), ([], [f"mode 1 param 2: lane budget: {ROUTE_B.route}"]))
+
 
 if __name__ == "__main__":
   unittest.main()
