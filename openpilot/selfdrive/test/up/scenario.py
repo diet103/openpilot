@@ -214,6 +214,17 @@ def timed_load(route: CarTestRoute) -> tuple[float, tuple[int, structs.CarParams
   return time.monotonic() - t, loaded
 
 
+def parse_budget(text: str) -> dict[int, float]:
+  # frames/s of the station's lanes, one number each for buses 0, 1 and 2
+  try:
+    rates = [float(r) for r in text.split(",")]
+  except ValueError as e:
+    raise argparse.ArgumentTypeError(f"{text!r}: expected three numbers for buses 0,1,2") from e
+  if len(rates) != 3 or not all(r > 0 for r in rates):
+    raise argparse.ArgumentTypeError(f"{text!r}: expected three positive numbers for buses 0,1,2")
+  return dict(enumerate(rates))
+
+
 def pool() -> ProcessPoolExecutor:
   return ProcessPoolExecutor(WORKERS, mp_context=multiprocessing.get_context("spawn"))
 
@@ -222,9 +233,10 @@ def main() -> None:
   from openpilot.selfdrive.test.up.replay import BUDGET
 
   parser = argparse.ArgumentParser(description="list every test route's scenario and coverage gaps")
-  parser.add_argument("--budget", help="frames/s of the station's lanes for buses 0,1,2, default " + ",".join(f"{r:g}" for r in BUDGET.values()))
+  parser.add_argument("--budget", type=parse_budget, default=BUDGET,
+                      help="frames/s of the station's lanes for buses 0,1,2, default " + ",".join(f"{r:g}" for r in BUDGET.values()))
   args = parser.parse_args()
-  budget = dict(enumerate(float(r) for r in args.budget.split(","))) if args.budget else BUDGET
+  budget = args.budget
 
   start = time.monotonic()
   times: Counter[str] = Counter()

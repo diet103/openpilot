@@ -1,3 +1,4 @@
+import argparse
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +12,8 @@ from opendbc.car.tests.test_models import get_cached_segment
 from opendbc.car.toyota.values import CAR as TOYOTA
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, can_span, car_params, engaged_samples, load_route, pick_window, safety_pair
+from openpilot.selfdrive.test.up.scenario import (Window, build_scenarios, can_span, car_params, engaged_samples, load_route, parse_budget,
+                                                  pick_window, safety_pair)
 
 ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")
 ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")
@@ -145,6 +147,12 @@ class TestScenario(unittest.TestCase):
       mangled.write_bytes(path.read_bytes())
       CP = car_params(route, mangled)
     self.assertEqual(CP.to_bytes(), car_params(route, path).to_bytes())
+
+  def test_parse_budget(self):
+    self.assertEqual(parse_budget("230,130,60"), {0: 230., 1: 130., 2: 60.})
+    for bad in ("230,130", "230,130,60,10", "230,x,60", "", "230,0,60"):
+      with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+        parse_budget(bad)
 
 if __name__ == "__main__":
   unittest.main()
