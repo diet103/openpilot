@@ -106,8 +106,9 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
 
     while t_ns >= 0 and next_tick * 1_000_000_000 <= t_ns:
       safety.set_timer(next_tick * 1_000_000 % 2**32)
-      tick()
+      # the panda checks the heartbeat before its safety tick, main.c
       safety.safety_heartbeat_check()
+      tick()
       if run.rx_checks_invalid_at is None and safety.safety_a.state.safety_rx_checks_invalid:
         run.rx_checks_invalid_at = float(next_tick)
       note_controls(float(next_tick))

@@ -1,5 +1,6 @@
 import unittest
 
+from opendbc.can.packer import CANPacker
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.libsafety import libsafety_py
 
@@ -7,6 +8,13 @@ from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.test.up.oracle import check_commands, check_state, load_libsafety, run_safety
 
 ALL_OUTPUT = int(CarParams.SafetyModel.allOutput)
+TOYOTA = int(CarParams.SafetyModel.toyota)
+TOYOTA_EPS_SCALE = 73
+TOYOTA_PACKER = CANPacker("toyota_nodsu_pt_generated")
+
+
+def pcm_cruise(active):
+  return TOYOTA_PACKER.make_can_msg("PCM_CRUISE", 0, {"CRUISE_ACTIVE": active, "GAS_RELEASED": 1})
 
 
 def can_msg(which, t, frames):
@@ -131,6 +139,14 @@ class TestOracle(unittest.TestCase):
       msgs.append(ps)
     self.assertEqual(len(run_safety(msgs, self.mode, 0).rx_rejected), 1)
     self.assertEqual(check_state(msgs, self.mode, 0), [])
+
+  def test_heartbeat_check_before_tick(self):
+    # cruise allows controls without an engaged heartbeat, the heartbeat check counts that before
+    # the tick drops controls for the RX checks that never got a message
+    msgs = [can_msg('can', 0., [pcm_cruise(1)]), can_msg('can', 1., [])]
+    run = run_safety(msgs, TOYOTA, TOYOTA_EPS_SCALE)
+    self.assertEqual(run.controls_allowed, [(0., False), (0., True), (1., False)])
+    self.assertEqual(libsafety_py.libsafety.safety_a.state.heartbeat_engaged_mismatches, 1)
 
 
 if __name__ == "__main__":
