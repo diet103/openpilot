@@ -2,7 +2,7 @@ import math
 from collections import Counter
 from collections.abc import Iterable
 
-from opendbc.can.dbc import Msg, SignalType
+from opendbc.can.dbc import DBC, Msg, SignalType
 from opendbc.can.packer import CANPacker
 from opendbc.can.parser import MAX_BAD_COUNTER
 from opendbc.car import structs
@@ -66,16 +66,17 @@ def needed_messages(CP: structs.CarParams, frames: list[Frame]) -> set[tuple[int
   parsers = [p for p in car.can_parsers.values() if p is not None]
   if radar.rcp is not None:
     parsers.append(radar.rcp)
-  return {(p.bus, addr) for p in parsers for addr in p.message_states} | _rx_checks(CP)
+  return {(p.bus, addr) for p in parsers for addr in p.message_states} | _rx_checks(CP).keys()
 
 
-def _rx_checks(CP: structs.CarParams) -> set[tuple[int, int]]:
+def _rx_checks(CP: structs.CarParams) -> dict[tuple[int, int], bool]:
+  # (bus, addr) of every message the panda checks -> whether it checks its counter
   mode, param = safety_pair(CP)
   safety = load_libsafety()
   if safety.set_safety_hooks(mode, param) != 0:
     raise ValueError(f"libsafety has no safety mode {mode} param {param}")
   cfg = safety.safety_a.setup.current_safety_config
-  return {(m.bus, m.addr) for i in range(cfg.rx_checks_len) for m in cfg.rx_checks[i].msg if m.addr}
+  return {(m.bus, m.addr): m.max_counter > 0 and not m.ignore_counter for i in range(cfg.rx_checks_len) for m in cfg.rx_checks[i].msg if m.addr}
 
 
 def _dbcs(CP: structs.CarParams) -> dict[tuple[int, int], str]:
@@ -116,6 +117,7 @@ def thin(CP: structs.CarParams, frames: list[Frame], budget: dict[int, float]) -
   load = Counter(bus for f in frames for _, _, bus in f)
   keep = {bus: max(1, math.ceil(load[bus] / seconds / rate)) for bus, rate in budget.items() if load[bus]}
   dbcs = _dbcs(CP)
+  parsed = {name: DBC(name) for name in set(dbcs.values())}
   rx_checks = _rx_checks(CP)
   # one packer per bus and DBC, so each bus continues its own counters
   packers: dict[tuple[int, str], CANPacker] = {}
@@ -127,18 +129,17 @@ def thin(CP: structs.CarParams, frames: list[Frame], budget: dict[int, float]) -
       n = seen[(bus, addr)]
       seen[(bus, addr)] += 1
       k = keep.get(bus, 1)
-      # the panda checks this message and no DBC can repack it, so it keeps every frame
-      if (bus, addr) in rx_checks and (bus, addr) not in dbcs:
+      dbc = dbcs.get((bus, addr))
+      msg = parsed[dbc].addr_to_msg[addr] if dbc is not None else None
+      # the panda checks this message and no DBC can repack it or its counter, so it keeps every frame
+      if (bus, addr) in rx_checks and (msg is None or (rx_checks[(bus, addr)] and not any(_is_counter(sig) for sig in msg.sigs.values()))):
         k = 1
       if n % k:
         continue
-      dbc = dbcs.get((bus, addr))
-      if k > 1 and dbc is not None:
+      # a kept frame skips k - 1 counter steps, repack it so the counter and checksum stay consecutive
+      if k > 1 and msg is not None and _checked(msg):
         packer = packers.setdefault((bus, dbc), CANPacker(dbc))
-        msg = packer.dbc.addr_to_msg[addr]
-        # a kept frame skips k - 1 counter steps, repack it so the counter and checksum stay consecutive
-        if _checked(msg):
-          addr, dat, bus = packer.make_can_msg(addr, bus, _values(msg, dat))
+        addr, dat, bus = packer.make_can_msg(addr, bus, _values(msg, dat))
       kept.append((addr, dat, bus))
     out.append(kept)
   return out

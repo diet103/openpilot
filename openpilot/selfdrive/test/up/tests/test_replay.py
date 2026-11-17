@@ -3,6 +3,7 @@ import unittest
 from opendbc.can.dbc import DBC, SignalType
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.tests.routes import routes
+from opendbc.car.hyundai.values import CAR as HYUNDAI
 from opendbc.car.toyota.values import CAR as TOYOTA, ToyotaSafetyFlags
 
 from openpilot.cereal.messaging import new_message
@@ -84,6 +85,15 @@ class TestReplay(unittest.TestCase):
   def test_thin_no_change_when_fits(self):
     frames = synthetic()
     self.assertEqual(thin(plain_cp(), frames, {0: 1000.}), frames)
+
+  def test_thin_keeps_counter_the_dbc_does_not_mark(self):
+    # the panda counter-checks 0x386, and the car's DBC has no COUNTER signal in it to repack
+    platform = str(HYUNDAI.HYUNDAI_KONA_EV)
+    CP = interfaces[platform].get_non_essential_params(platform)
+    frames = [[(0x386, bytes(8), 0), (0x7f0, bytes(8), 0), (0x7f1, bytes(8), 0)] for _ in range(200)]
+    out = thin(CP, frames, {0: 60.})
+    self.assertEqual(positions(out, 0x386), list(range(200)))
+    self.assertLess(len(positions(out, 0x7f0)), 200)
 
   def test_window_frames_drops_echoes(self):
     msgs = [can_msg(0., [(0x10, b'a', 0), (0x11, b'b', 128), (0x12, b'c', 192), (0x13, b'e', 4)]), can_msg(0.015, [(0x10, b'd', 1)])]
