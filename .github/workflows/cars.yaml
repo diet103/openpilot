@@ -1,0 +1,49 @@
+name: cars
+
+# scenarios.json is generated from opendbc's test routes, regenerating downloads them all, so only when its inputs change
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'opendbc_repo'
+      - 'openpilot/selfdrive/test/cars/**'
+  pull_request:
+    paths:
+      - 'opendbc_repo'
+      - 'openpilot/selfdrive/test/cars/**'
+  workflow_dispatch:
+
+concurrency:
+  group: cars-ci-run-${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && github.run_id || github.head_ref || github.ref }}-${{ github.workflow }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  CI: 1
+  PYTHONPATH: ${{ github.workspace }}
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: lfs.fetchexclude
+  GIT_CONFIG_VALUE_0: openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl
+
+jobs:
+  scenarios:
+    name: scenarios
+    runs-on: ${{
+      (github.repository == 'commaai/openpilot') &&
+      ((github.event_name != 'pull_request') ||
+      (github.event.pull_request.head.repo.full_name == 'commaai/openpilot'))
+      && fromJSON('["namespace-profile-amd64-8x16"]')
+      || fromJSON('["ubuntu-24.04"]') }}
+    steps:
+    - uses: actions/checkout@v7
+    - run: ./tools/op.sh setup
+    - name: Cache test routes
+      uses: actions/cache@v6
+      with:
+        path: /tmp/comma_download_cache
+        key: car_routes-${{ hashFiles('opendbc_repo/opendbc/car/tests/routes.py') }}
+    - name: Check scenarios.json is up to date
+      timeout-minutes: 30
+      run: |
+        python -m openpilot.selfdrive.test.cars.scenario
+        git diff --exit-code openpilot/selfdrive/test/cars/scenarios.json
