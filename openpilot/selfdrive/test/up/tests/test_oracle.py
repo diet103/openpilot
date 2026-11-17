@@ -4,7 +4,7 @@ from opendbc.car.structs import CarParams
 from opendbc.safety.tests.libsafety import libsafety_py
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.oracle import check_commands, check_state, load_libsafety
+from openpilot.selfdrive.test.up.oracle import check_commands, check_state, load_libsafety, run_safety
 
 ALL_OUTPUT = int(CarParams.SafetyModel.allOutput)
 
@@ -50,7 +50,7 @@ def flip(msg):
   return can_msg('can', msg.logMonoTime / 1e9, [(c.address, c.dat, c.src + 64)])
 
 
-def heartbeat_recording(panda_allowed_until, change=5.5, end=14.):
+def heartbeat_recording(panda_allowed_until, change=5.5, end=14., rx_invalid_from=None, alt_exp=0):
   msgs = [can_msg('can', 0., [])]
   for i in range(int(end * 10)):
     t = i / 10
@@ -61,6 +61,8 @@ def heartbeat_recording(panda_allowed_until, change=5.5, end=14.):
     if i % 5 == 2:
       ps = new_message('pandaStates', 1)
       ps.pandaStates[0].controlsAllowed = t < panda_allowed_until
+      ps.pandaStates[0].safetyRxInvalid = int(rx_invalid_from is not None and t >= rx_invalid_from)
+      ps.pandaStates[0].alternativeExperience = alt_exp
       ps.logMonoTime = int(t * 1e9) + 1
       msgs.append(ps)
   return msgs
@@ -94,6 +96,16 @@ class TestOracle(unittest.TestCase):
 
   def test_state_stuck_engaged(self):
     self.assertGreater(len(check_state(heartbeat_recording(11.5), ALL_OUTPUT, 0)), 0)
+
+  def test_rx_invalid_reported_once(self):
+    mismatches = check_state(heartbeat_recording(7.5, rx_invalid_from=3.), ALL_OUTPUT, 0)
+    self.assertEqual(len(mismatches), 1)
+    self.assertIn("RX invalid", mismatches[0])
+
+  def test_alternative_experience_applied(self):
+    # libsafety has no getter, run_safety leaves its library loaded so the setup can be read back
+    run_safety(heartbeat_recording(7.5, alt_exp=16), ALL_OUTPUT, 0)
+    self.assertEqual(libsafety_py.libsafety.safety_a.setup.alternative_experience, 16)
 
 
 if __name__ == "__main__":

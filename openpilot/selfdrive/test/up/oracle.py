@@ -83,6 +83,9 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
     raise ValueError(f"libsafety has no safety mode {mode} param {param}")
   tick = safety.safety_tick if hasattr(safety, "safety_tick") else safety.safety_tick_current_safety_config
   heartbeat_source = _heartbeat_source(msgs)
+  # the panda's own alternative experience, as it logged it before the first can message
+  alt_exp = next((int(ps.alternativeExperience) for m in msgs if m.logMonoTime < first and (ps := _panda_state(m)) is not None), 0)
+  safety.set_alternative_experience(alt_exp)
 
   pending: Counter[tuple[int, int, bytes]] = Counter()
   # the timer crosses its first whole second one second after the first message
@@ -121,7 +124,12 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
           safety.safety_fwd_hook(c.src, c.address)
           if not safety.safety_rx_hook(libsafety_py.make_CANPacket(c.address, c.src, c.dat)):
             run.rx_rejected.append((t, c.address, c.src))
-    elif t_ns >= 0 and (ps := _panda_state(m)) is not None:
+    elif (ps := _panda_state(m)) is not None:
+      if ps.alternativeExperience != alt_exp:
+        alt_exp = int(ps.alternativeExperience)
+        safety.set_alternative_experience(alt_exp)
+      if t_ns < 0:
+        continue
       run.samples.append((t, bool(ps.controlsAllowed), bool(safety.get_controls_allowed()), int(ps.safetyRxInvalid), len(run.rx_rejected)))
   return run
 
@@ -148,11 +156,9 @@ def state_mismatches(run: SafetyRun, msgs: list) -> list[str]:
       continue
     mismatches.append(f"t={t:.2f} controls_allowed: panda {panda}, libsafety {lib}")
 
-  if run.samples:
-    t0, _, _, panda0, lib0 = run.samples[0]
-    for t, _, _, panda, lib in run.samples:
-      if panda - panda0 != lib - lib0:
-        mismatches.append(f"t={t:.2f} RX invalid since t={t0:.2f}: panda {panda - panda0}, libsafety {lib - lib0}")
+  for (t0, _, _, panda0, lib0), (t, _, _, panda, lib) in zip(run.samples, run.samples[1:], strict=False):
+    if panda - panda0 != lib - lib0:
+      mismatches.append(f"t={t:.2f} RX invalid since t={t0:.2f}: panda {panda - panda0}, libsafety {lib - lib0}")
   return mismatches
 
 
