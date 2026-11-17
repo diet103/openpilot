@@ -1,6 +1,9 @@
 import json
 import math
+import multiprocessing
+import os
 from collections.abc import Iterable
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -154,6 +157,15 @@ def load_route(route: CarTestRoute) -> tuple[int, structs.CarParams, list]:
   raise OSError("; ".join(errors))
 
 
+def read_route(route: CarTestRoute) -> tuple[int, tuple[int, int], float, list[tuple[float, bool]]] | Exception:
+  # the picklable part of a route's load, run in a worker, a failure comes back as the exception
+  try:
+    segment, CP, msgs = load_route(route)
+    return segment, safety_pair(CP), can_span(msgs), engaged_samples(msgs)
+  except Exception as e:
+    return e
+
+
 def build_candidates(routes) -> tuple[dict[tuple[int, int], list[Scenario]], list[str]]:
   # every route's scenario per pair, in routes order, so a pair can fall back to its next route
   scenarios: dict[tuple[int, int], list[Scenario]] = {}
@@ -161,16 +173,15 @@ def build_candidates(routes) -> tuple[dict[tuple[int, int], list[Scenario]], lis
   engaged_from_start: set[tuple[int, int]] = set()
   no_lead_in: set[tuple[int, int]] = set()
   gaps = []
-  for route in routes:
+  with ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("spawn")) as pool:
+    loaded = list(pool.map(read_route, routes))
+  for route, result in zip(routes, loaded, strict=True):
     who = f"{route.car_model} {route.route}"
-    try:
-      segment, CP, msgs = load_route(route)
-    except Exception as e:
-      gaps.append(f"{who}: can't load ({e})")
+    if isinstance(result, Exception):
+      gaps.append(f"{who}: can't load ({result})")
       continue
 
-    mode_param = safety_pair(CP)
-    span = can_span(msgs)
+    segment, mode_param, span, samples = result
     if span < LENGTH:
       gaps.append(f"{who}: segment shorter than {LENGTH:g} s")
       continue
@@ -181,7 +192,6 @@ def build_candidates(routes) -> tuple[dict[tuple[int, int], list[Scenario]], lis
       continue
     seen_pairs.add(mode_param)
 
-    samples = engaged_samples(msgs)
     if not samples:
       gaps.append(f"{who}: no panda state logged")
       continue
