@@ -9,8 +9,8 @@ from opendbc.car.can_definitions import CanData
 from opendbc.car.car_helpers import interfaces
 
 from openpilot.selfdrive.pandad import can_capnp_to_list
-from openpilot.selfdrive.test.onroad_cars.rules import BUSES
-from openpilot.selfdrive.test.onroad_cars.scenario import Scenario, Window, build_candidates, load_log
+from openpilot.selfdrive.test.cars.rules import BUSES
+from openpilot.selfdrive.test.cars.scenario import Scenario, Window, build_candidates, load_log
 
 # the UP's can_replay frame period
 DT = 0.01

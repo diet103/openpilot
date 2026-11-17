@@ -3,7 +3,7 @@ import unittest
 from opendbc.car.structs import CarParams
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.onroad_cars.rules import rule_failures
+from openpilot.selfdrive.test.cars.rules import rule_failures
 
 TOYOTA = int(CarParams.SafetyModel.toyota)
 
