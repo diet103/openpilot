@@ -6,10 +6,12 @@ from unittest import mock
 import zstandard as zstd
 
 from opendbc.car import structs
-from opendbc.car.tests.routes import CarTestRoute
+from opendbc.car.tests.routes import CarTestRoute, routes
+from opendbc.car.tests.test_models import get_cached_segment
+from opendbc.car.toyota.values import CAR as TOYOTA
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, can_span, engaged_samples, load_route, pick_window, safety_pair
+from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, can_span, car_params, engaged_samples, load_route, pick_window, safety_pair
 
 ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")
 ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")
@@ -35,7 +37,7 @@ def panda_states(allowed_by_second, start=0., can_at=0.):
   return msgs
 
 
-def car_params(mode, param):
+def fake_car_params(mode, param):
   CP = structs.CarParams()
   cfg = structs.CarParams.SafetyConfig()
   cfg.safetyModel, cfg.safetyParam = mode, param
@@ -48,7 +50,7 @@ def fake_load(by_route, pairs=None):
     item = by_route[route.route]
     if isinstance(item, Exception):
       raise item
-    return 2, car_params(*(pairs or {}).get(route.route, (1, 2))), item
+    return 2, fake_car_params(*(pairs or {}).get(route.route, (1, 2))), item
   return load
 
 
@@ -127,10 +129,22 @@ class TestScenario(unittest.TestCase):
       path = Path(tmp) / "0123.zst&sig=abc%3D"
       path.write_bytes(zstd.compress(b"".join(m.to_bytes() for m in msgs)))
       with mock.patch("openpilot.selfdrive.test.up.scenario.get_cached_segment", return_value=path):
-        segment, CP, loaded = load_route(CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A", 0), params=lambda r, p: car_params(1, 2))
+        segment, CP, loaded = load_route(CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A", 0), params=lambda r, p: fake_car_params(1, 2))
     self.assertEqual((segment, safety_pair(CP)), (0, (1, 2)))
     self.assertEqual([m.logMonoTime for m in loaded], [int(1e9), int(2e9)])
 
+
+  def test_car_params_signed_url_name(self):
+    route = next(r for r in routes if r.car_model == TOYOTA.TOYOTA_COROLLA_TSS2)
+    try:
+      path = get_cached_segment(route.route, 2)
+    except OSError as e:
+      raise unittest.SkipTest(f"{route.route} not cached: {e}") from e
+    with tempfile.TemporaryDirectory() as tmp:
+      mangled = Path(tmp) / "0123.zst&sig=abc%3D"
+      mangled.write_bytes(path.read_bytes())
+      CP = car_params(route, mangled)
+    self.assertEqual(CP.to_bytes(), car_params(route, path).to_bytes())
 
 if __name__ == "__main__":
   unittest.main()
