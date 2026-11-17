@@ -1,10 +1,7 @@
+import json
 import math
-import os
-import pickle
-import subprocess
-import tempfile
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from opendbc.car import structs
@@ -14,12 +11,12 @@ from opendbc.car.tests.routes import CarTestRoute, routes as test_routes
 from opendbc.car.tests.test_models import TestCarModelBase, get_cached_segment
 from opendbc.safety.tests.libsafety import libsafety_py
 
-from openpilot.common.basedir import BASEDIR
 from openpilot.tools.lib.logreader import LogReader
 
 LEAD = 5.
 LENGTH = 30.
 MIN_ENGAGED = 10.
+SCENARIOS = Path(__file__).parent / "scenarios.json"
 
 
 @dataclass(frozen=True)
@@ -38,7 +35,6 @@ class Scenario:
   window: Window
   # the panda's engage edge, in segment seconds
   rise: float
-  CP: structs.CarParams
   # (bus, addr) of every message the panda checks -> whether it checks its counter, read when the list is built
   rx_checks: dict[tuple[int, int], bool]
 
@@ -124,8 +120,8 @@ def rx_checks(mode: int, param: int) -> dict[tuple[int, int], bool]:
   return checks
 
 
-def car_params(route: CarTestRoute, path: Path) -> structs.CarParams:
-  cls = type("R", (TestCarModelBase,), {"test_route": route, "platform": route.car_model})
+def car_params(car_model: str, path: Path) -> structs.CarParams:
+  cls = type("R", (TestCarModelBase,), {"platform": car_model})
   car_fw, _, alpha_long = cls.get_testing_data_from_logreader(OpendbcLogReader(str(path), only_union_types=True, sort_by_time=True))
   return interfaces[cls.platform].get_params(cls.platform, cls.fingerprint, car_fw, alpha_long, False, docs=False)
 
@@ -135,8 +131,10 @@ def read_log(path: Path) -> list:
   return sorted(LogReader.from_bytes(path.read_bytes()), key=lambda m: m.logMonoTime)
 
 
-def load_log(s: Scenario) -> list:
-  return read_log(get_cached_segment(s.route, s.segment))
+def load_scenario(s: Scenario) -> tuple[structs.CarParams, list]:
+  # the scenario's log and the car params thinning repacks with, one route's worth of work
+  path = get_cached_segment(s.route, s.segment)
+  return car_params(s.car_model, path), read_log(path)
 
 
 def load_route(route: CarTestRoute) -> tuple[int, structs.CarParams, list]:
@@ -150,7 +148,7 @@ def load_route(route: CarTestRoute) -> tuple[int, structs.CarParams, list]:
       errors.append(f"segment {segment}: {e!r}")
       continue
     try:
-      return segment, car_params(route, path), msgs
+      return segment, car_params(str(route.car_model), path), msgs
     except Exception as e:
       errors.append(f"segment {segment}: can't derive safety config: {e!r}")
   raise OSError("; ".join(errors))
@@ -190,7 +188,7 @@ def build_candidates(routes) -> tuple[dict[tuple[int, int], list[Scenario]], lis
     picked = pick_window(samples, span)
     if picked is not None:
       window, rise = picked
-      scenario = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, rise, CP, checks)
+      scenario = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, rise, checks)
       scenarios.setdefault(mode_param, []).append(scenario)
     elif pick_window(samples, span, lead_in=False) is not None:
       no_lead_in.add(mode_param)
@@ -207,33 +205,33 @@ def build_candidates(routes) -> tuple[dict[tuple[int, int], list[Scenario]], lis
   return scenarios, gaps
 
 
-def source_tree() -> str:
-  # opendbc and this harness, so a change to either rebuilds the list
-  ids = []
-  for path in ("opendbc_repo", "openpilot/selfdrive/test/cars"):
-    ids.append(subprocess.check_output(["git", "rev-parse", f"HEAD:{path}"], cwd=BASEDIR, text=True).strip())
-  return "-".join(ids)
+def dumps(scenarios: list[Scenario], gaps: list[str]) -> str:
+  # one scenario or gap per line, so a change reads as a diff of the cars it touches
+  rows = []
+  for s in sorted(scenarios, key=lambda s: (s.mode, s.param)):
+    row = asdict(s)
+    row["rx_checks"] = sorted([bus, addr, counter] for (bus, addr), counter in s.rx_checks.items())
+    rows.append(json.dumps(row, sort_keys=True))
+  gap_lines = ",\n  ".join(json.dumps(gap) for gap in sorted(gaps))
+  scenario_lines = ",\n  ".join(rows)
+  return f'{{\n "gaps": [\n  {gap_lines}\n ],\n "scenarios": [\n  {scenario_lines}\n ]\n}}\n'
 
 
-def cached_scenarios(cache_dir: Path, budget: dict[int, float],
-                     build: Callable[[Iterable[CarTestRoute], dict[int, float]], tuple[list[Scenario], list[str]]]) -> tuple[list[Scenario], list[str]]:
-  # the list changes with the sources and the lane budget it was picked for
-  lanes = "-".join(f"{bus}:{rate:g}" for bus, rate in sorted(budget.items()))
-  path = cache_dir / f"{source_tree()}-{lanes}.pkl"
-  if path.exists():
-    try:
-      scenarios, gaps = pickle.loads(path.read_bytes())
-      return scenarios, gaps
-    except Exception:
-      pass
+def load_scenarios() -> tuple[list[Scenario], list[str]]:
+  data = json.loads(SCENARIOS.read_text())
+  scenarios = []
+  for row in data["scenarios"]:
+    row["window"] = Window(**row["window"])
+    row["rx_checks"] = {(bus, addr): counter for bus, addr, counter in row["rx_checks"]}
+    scenarios.append(Scenario(**row))
+  return scenarios, data["gaps"]
 
-  data = pickle.dumps(build(test_routes, budget))
-  cache_dir.mkdir(parents=True, exist_ok=True)
-  # write whole or not at all, runs share the cache dir
-  fd, tmp = tempfile.mkstemp(dir=cache_dir)
-  with os.fdopen(fd, "wb") as f:
-    f.write(data)
-  os.replace(tmp, path)
-  # pickling marks a CP written, so hand back the same thing a cache hit does
-  scenarios, gaps = pickle.loads(data)
-  return scenarios, gaps
+
+def main() -> None:
+  # replay imports this module
+  from openpilot.selfdrive.test.cars.replay import BUDGET, pick_scenarios
+  SCENARIOS.write_text(dumps(*pick_scenarios(test_routes, BUDGET)))
+
+
+if __name__ == "__main__":
+  main()

@@ -45,7 +45,7 @@ name = "Onroad tests"
 run = "openpilot/tools/replay/can_replay.py --up && ./openpilot/selfdrive/test/test_onroad.py TestOnroad"
 timeout-minutes = 1.5
 
-# every car's engaged route window end to end, the UP plays the car. the scenario list and the route logs live in the cache
+# every car's engaged route window from scenarios.json end to end, the UP plays the car. the route logs live in the cache
 [jobs.cars]
 runs-on = "up-can"
 timeout-minutes = 60

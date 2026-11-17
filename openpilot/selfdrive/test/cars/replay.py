@@ -10,7 +10,7 @@ from opendbc.car.car_helpers import interfaces
 
 from openpilot.selfdrive.pandad import can_capnp_to_list
 from openpilot.selfdrive.test.cars.rules import BUSES
-from openpilot.selfdrive.test.cars.scenario import Scenario, Window, build_candidates, load_log
+from openpilot.selfdrive.test.cars.scenario import Scenario, Window, build_candidates, load_scenario
 
 # the UP's can_replay frame period
 DT = 0.01
@@ -156,16 +156,17 @@ def over_budget(frames: list[Frame], budget: dict[int, float]) -> list[str]:
   return over
 
 
-def build_replay(s: Scenario, msgs: list, budget: dict[int, float]) -> list[Frame]:
+def build_replay(s: Scenario, CP: structs.CarParams, msgs: list, budget: dict[int, float]) -> list[Frame]:
   # what a station sends, one frame per DT
-  needed = needed_frames(s.CP, s.rx_checks, window_frames(msgs, s.window))
-  return thin(s.CP, s.rx_checks, needed, budget)
+  needed = needed_frames(CP, s.rx_checks, window_frames(msgs, s.window))
+  return thin(CP, s.rx_checks, needed, budget)
 
 
 def pick_replay(candidates: list[Scenario], budget: dict[int, float]) -> tuple[Scenario, list[str]]:
   # a pair's scenarios in routes order, the first whose replay fits the station's lanes, or else the last
   for s in candidates:
-    lane_problems = over_budget(build_replay(s, load_log(s), budget), budget)
+    CP, msgs = load_scenario(s)
+    lane_problems = over_budget(build_replay(s, CP, msgs, budget), budget)
     if not lane_problems:
       break
   return s, lane_problems

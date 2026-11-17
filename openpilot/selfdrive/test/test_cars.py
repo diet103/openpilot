@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 import os
 import time
-import tomllib
 import unittest
 from dataclasses import dataclass
-from pathlib import Path
 
-from openpilot.common.basedir import BASEDIR
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.common.utils import tabulate
 from openpilot.selfdrive.test.cars.drive import Drive, RigProblem
-from openpilot.selfdrive.test.cars.replay import BUDGET, build_replay, pick_scenarios
+from openpilot.selfdrive.test.cars.replay import BUDGET, build_replay
 from openpilot.selfdrive.test.cars.rules import rule_failures
-from openpilot.selfdrive.test.cars.scenario import Scenario, cached_scenarios, load_log
+from openpilot.selfdrive.test.cars.scenario import Scenario, load_scenario, load_scenarios
 
 NOT_DRIVEN = "not driven"
 RIG_PROBLEM = "rig problem"
@@ -39,13 +36,8 @@ class DriveResult:
     return self.failures[0] if self.failures else ""
 
 
-def cars_cache() -> Path:
-  alfred = tomllib.loads((Path(BASEDIR) / "alfred.toml").read_text())
-  return Path(alfred["cache"][0]) / "cars"
-
-
 # every car's engaged route window on a DUT in an ultimate provisioning (UP) station, the UP plays the car.
-# setup_class drives each scenario once and records it, the tests check the recordings.
+# setup_class drives each scenario in scenarios.json once and records it, the tests check the recordings.
 # SCENARIOS=TOYOTA_COROLLA_TSS2,HONDA_CIVIC only drives those car models
 class TestCars(OpenpilotTestCase):
   COMMA_HARDWARE_TEST = True
@@ -57,9 +49,9 @@ class TestCars(OpenpilotTestCase):
   @classmethod
   def setup_class(cls):
     from ultimate_provisioning import UP  # only on a DUT, from its UP's up run or up ssh
-    scenarios, gaps = cached_scenarios(cars_cache(), BUDGET, pick_scenarios)
+    scenarios, gaps = load_scenarios()
     for gap in gaps:
-      print(f"gap: {gap}")
+      print(f"gap: {gap}", flush=True)
     models = os.getenv("SCENARIOS")
     if models is not None:
       scenarios = [s for s in scenarios if s.car_model in models.split(",")]
@@ -87,7 +79,8 @@ class TestCars(OpenpilotTestCase):
     s = result.scenario
     start = time.monotonic()
     try:
-      frames = build_replay(s, load_log(s), BUDGET)
+      CP, msgs = load_scenario(s)
+      frames = build_replay(s, CP, msgs, BUDGET)
       msgs = drive.run(s, frames)
       result.failures = rule_failures(msgs, s.mode, s.param)
       result.status = "passed" if not result.failures else "failed"
