@@ -52,7 +52,12 @@ def engaged_samples(msgs: Iterable) -> list[tuple[float, bool]]:
   return samples
 
 
-def pick_window(samples: list[tuple[float, bool]]) -> Window | None:
+def can_span(msgs: Iterable) -> float:
+  times = [m.logMonoTime for m in msgs if m.which() == 'can']
+  return (max(times) - min(times)) / 1e9 if times else 0.
+
+
+def pick_window(samples: list[tuple[float, bool]], can_end: float) -> Window | None:
   best = None
   best_len = 0.
   rise = None
@@ -62,13 +67,13 @@ def pick_window(samples: list[tuple[float, bool]]) -> Window | None:
       rise = t
     last = i == len(samples) - 1
     if rise is not None and (not allowed or last):
-      length = t - rise
+      length = (can_end if allowed else t) - rise
       if length >= MIN_ENGAGED and length > best_len:
         best, best_len = rise, length
       rise = None
   if best is None:
     return None
-  start = max(0., best - LEAD)
+  start = max(0., min(best - LEAD, can_end - LENGTH))
   return Window(start, start + LENGTH)
 
 
@@ -80,34 +85,38 @@ def safety_pair(route: CarTestRoute, path: Path) -> tuple[int, int]:
   return int(cfg.safetyModel.raw), int(cfg.safetyParam)
 
 
-def load_route(route: CarTestRoute) -> tuple[int, Path, list]:
+def load_route(route: CarTestRoute, pair: Callable[[CarTestRoute, Path], tuple[int, int]] = safety_pair) -> tuple[int, tuple[int, int], list]:
   segments = (2, 1, 0) if route.segment is None else (route.segment,)
+  errors = []
   for segment in segments:
     try:
       path = get_cached_segment(route.route, segment)
-      return segment, path, list(LogReader(str(path), sort_by_time=True))
-    except (OSError, AssertionError):
-      pass
-  raise OSError(f"segments {segments} not found")
+      msgs = list(LogReader(str(path), sort_by_time=True))
+    except (OSError, AssertionError) as e:
+      errors.append(f"segment {segment}: {e!r}")
+      continue
+    try:
+      return segment, pair(route, path), msgs
+    except Exception as e:
+      errors.append(f"segment {segment}: can't derive safety config: {e!r}")
+  raise OSError("; ".join(errors))
 
 
-def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, Path, list]] = load_route,
-                    pair: Callable[[CarTestRoute, Path], tuple[int, int]] = safety_pair) -> tuple[list[Scenario], list[str]]:
+def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, tuple[int, int], list]] = load_route) -> tuple[list[Scenario], list[str]]:
   scenarios: dict[tuple[int, int], Scenario] = {}
   seen_pairs: set[tuple[int, int]] = set()
   gaps = []
   for route in routes:
     who = f"{route.car_model} {route.route}"
     try:
-      segment, path, msgs = load(route)
+      segment, mode_param, msgs = load(route)
     except Exception as e:
       gaps.append(f"{who}: can't load ({e})")
       continue
 
-    try:
-      mode_param = pair(route, path)
-    except Exception as e:
-      gaps.append(f"{who}: can't derive safety config: {e!r}")
+    span = can_span(msgs)
+    if span < LENGTH:
+      gaps.append(f"{who}: segment shorter than {LENGTH:g} s")
       continue
     seen_pairs.add(mode_param)
     if mode_param in scenarios:
@@ -117,7 +126,7 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, Path, list
     if not samples:
       gaps.append(f"{who}: no panda state logged")
       continue
-    window = pick_window(samples)
+    window = pick_window(samples, span)
     if window is not None:
       scenarios[mode_param] = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window)
 

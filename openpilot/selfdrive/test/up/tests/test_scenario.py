@@ -1,10 +1,9 @@
 import unittest
-from pathlib import Path
 
 from opendbc.car.tests.routes import CarTestRoute
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, engaged_samples, pick_window
+from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, can_span, engaged_samples, pick_window
 
 ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")
 ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")
@@ -21,7 +20,7 @@ def can_start(t=0.):
 
 
 def panda_states(allowed_by_second, start=0., can_at=0.):
-  msgs = [can_start(can_at)]
+  msgs = [can_start(can_at), can_start(can_at + len(allowed_by_second))]
   for i, allowed in enumerate(allowed_by_second):
     msg = new_message('pandaStates', 1)
     msg.pandaStates[0].controlsAllowed = allowed
@@ -30,41 +29,34 @@ def panda_states(allowed_by_second, start=0., can_at=0.):
   return msgs
 
 
-def fake_load(by_route):
+def fake_load(by_route, pairs=None):
   def load(route):
     item = by_route[route.route]
     if isinstance(item, Exception):
       raise item
-    return 2, Path(route.route), item
+    return 2, (pairs or {}).get(route.route, (1, 2)), item
   return load
-
-
-def fake_pair(pairs):
-  def pair(route, path):
-    item = pairs[route.route]
-    if isinstance(item, Exception):
-      raise item
-    return item
-  return pair
 
 
 class TestScenario(unittest.TestCase):
   def test_window_longest_stretch(self):
-    self.assertEqual(pick_window(samples((2, 9), (20, 60))), Window(15., 45.))
+    self.assertEqual(pick_window(samples((2, 9), (20, 60)), 70.), Window(15., 45.))
 
   def test_window_clamped_at_start(self):
-    self.assertEqual(pick_window(samples((0, 40))), Window(0., 30.))
+    self.assertEqual(pick_window(samples((0, 40)), 70.), Window(0., 30.))
 
   def test_window_too_short(self):
-    self.assertIsNone(pick_window(samples((3, 12))))
+    self.assertIsNone(pick_window(samples((3, 12)), 70.))
 
   def test_window_never_engaged(self):
-    self.assertIsNone(pick_window(samples()))
+    self.assertIsNone(pick_window(samples(), 70.))
+
+  def test_window_fits_segment(self):
+    self.assertEqual(pick_window(samples((50, 60), end=60), 60.), Window(30., 60.))
 
   def test_one_scenario_per_pair(self):
     engaged = panda_states([False] * 10 + [True] * 30)
-    scenarios, gaps = build_scenarios([ROUTE_A, ROUTE_B], fake_load({ROUTE_A.route: engaged, ROUTE_B.route: engaged}),
-                                      fake_pair({ROUTE_A.route: (1, 2), ROUTE_B.route: (1, 2)}))
+    scenarios, gaps = build_scenarios([ROUTE_A, ROUTE_B], fake_load({ROUTE_A.route: engaged, ROUTE_B.route: engaged}))
     self.assertEqual(len(scenarios), 1)
     self.assertEqual(scenarios[0].route, ROUTE_A.route)
     self.assertEqual(scenarios[0].car_model, "CAR_A")
@@ -73,30 +65,30 @@ class TestScenario(unittest.TestCase):
     self.assertEqual(gaps, [])
 
   def test_gap_when_no_window(self):
-    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([False] * 20)}), fake_pair({ROUTE_A.route: (3, 4)}))
+    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([False] * 40)}, {ROUTE_A.route: (3, 4)}))
     self.assertEqual(scenarios, [])
     self.assertEqual(len(gaps), 1)
     self.assertIn("mode 3 param 4", gaps[0])
     self.assertIn("no engaged stretch", gaps[0])
 
   def test_gap_when_no_panda_state(self):
-    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: []}), fake_pair({ROUTE_A.route: (1, 2)}))
+    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: [can_start(0.), can_start(40.)]}))
     self.assertEqual(scenarios, [])
     self.assertIn("no panda state logged", gaps[0])
     self.assertIn("CAR_A", gaps[0])
 
-  def test_times_from_first_can(self):
-    early = panda_states([False], start=100.)[1:]
-    engaged = panda_states([20 <= i < 60 for i in range(70)], start=200., can_at=200.)
-    self.assertEqual(pick_window(engaged_samples(early + engaged)), Window(15., 45.))
-
-  def test_gap_when_pair_fails(self):
-    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([True] * 20)}), fake_pair({ROUTE_A.route: KeyError("x")}))
+  def test_short_segment_gap(self):
+    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([True] * 20)}))
     self.assertEqual(scenarios, [])
-    self.assertIn("can't derive safety config", gaps[0])
+    self.assertIn("segment shorter than 30 s", gaps[0])
+
+  def test_times_from_first_can(self):
+    early = panda_states([False], start=100.)[2:]
+    engaged = panda_states([20 <= i < 60 for i in range(70)], start=200., can_at=200.)
+    self.assertEqual(pick_window(engaged_samples(early + engaged), can_span(engaged)), Window(15., 45.))
 
   def test_gap_when_load_fails(self):
-    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: OSError("nope")}), fake_pair({}))
+    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: OSError("nope")}))
     self.assertEqual(scenarios, [])
     self.assertIn("can't load", gaps[0])
 
