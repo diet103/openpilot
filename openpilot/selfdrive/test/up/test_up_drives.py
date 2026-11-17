@@ -85,8 +85,8 @@ class TestUPDrives(OpenpilotTestCase):
     s = result.scenario
     start = time.monotonic()
     try:
-      replay = build_replay(s.CP, load_log(s), s.window, BUDGET)
-      msgs = drive.run(s, replay.frames)
+      frames = build_replay(s, load_log(s), BUDGET)
+      msgs = drive.run(s, frames)
       result.failures = rule_failures(msgs, s.mode, s.param)
       result.status = "passed" if not result.failures else "failed"
     except RigProblem as e:

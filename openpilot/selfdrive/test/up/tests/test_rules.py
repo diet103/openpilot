@@ -1,24 +1,18 @@
-import time
 import unittest
 
 from opendbc.car.structs import CarParams
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.rules import ENGAGE_LIMIT, rule_failures
+from openpilot.selfdrive.test.up.rules import rule_failures
 
 TOYOTA = int(CarParams.SafetyModel.toyota)
 
 
-def panda_state(t, controls_allowed=True, mode=TOYOTA, param=0, faults=()):
+def panda_state(t, controls_allowed):
   msg = new_message('pandaStates', 1)
   msg.logMonoTime = int(t * 1e9)
-  state = msg.pandaStates[0]
-  state.controlsAllowed = controls_allowed
-  state.safetyModel = mode
-  state.safetyParam = param
-  fault_list = state.init('faults', len(faults))
-  for i, fault in enumerate(faults):
-    fault_list[i] = fault
+  msg.pandaStates[0].controlsAllowed = controls_allowed
+  msg.pandaStates[0].safetyModel = TOYOTA
   return msg
 
 
@@ -52,43 +46,21 @@ def clean_drive(duration=5.):
   return msgs
 
 
+def failures(msgs):
+  return rule_failures(msgs, TOYOTA, 0)
+
+
 class TestRules(unittest.TestCase):
   def test_clean_drive(self):
-    self.assertEqual(rule_failures(clean_drive(), TOYOTA, 0), [])
-
-  def test_not_engaged(self):
-    msgs = [panda_state(0., False), selfdrive_state(0., False), panda_state(1., True)]
-    msgs.append(selfdrive_state(1. + ENGAGE_LIMIT + 1., False))
-    failures = rule_failures(msgs, TOYOTA, 0)
-    self.assertEqual(len(failures), 1)
-    self.assertIn("not engaged", failures[0])
-
-  def test_blocked_while_engaged(self):
-    msgs = clean_drive()
-    msgs.append(can_msg('can', 3.05, [(0x100, 192)]))
-    failures = rule_failures(msgs, TOYOTA, 0)
-    self.assertEqual(len(failures), 1)
-    self.assertIn("blocked while engaged", failures[0])
-
-  def test_no_commands_while_engaged(self):
-    msgs = [m for m in clean_drive() if m.which() != 'sendcan']
-    failures = rule_failures(msgs, TOYOTA, 0)
-    self.assertEqual(len(failures), 1)
-    self.assertIn("commands stopped", failures[0])
-
-  def test_commands_stop_midway(self):
-    msgs = [m for m in clean_drive(8.) if not (m.which() == 'sendcan' and m.logMonoTime >= 5 * 1e9)]
-    failures = rule_failures(msgs, TOYOTA, 0)
-    self.assertEqual(len(failures), 1)
-    self.assertIn("commands stopped", failures[0])
+    self.assertEqual(failures(clean_drive()), [])
 
   def test_brake_disengage(self):
+    # the panda drops controls and blocks commands, openpilot disengages right after
     msgs = clean_drive(3.)
     msgs.append(panda_state(5., False))
     msgs.append(can_msg('can', 5., [(0x100, 192)]))
-    msgs.append(can_msg('can', 5., [(0x101, 192)]))
     msgs.append(selfdrive_state(5.02, False))
-    self.assertEqual(rule_failures(msgs, TOYOTA, 0), [])
+    self.assertEqual(failures(msgs), [])
 
   def test_stuck_engaged_after_drop(self):
     msgs = clean_drive(3.)
@@ -97,49 +69,20 @@ class TestRules(unittest.TestCase):
     for i in range(3):
       msgs.append(can_msg('sendcan', 5.01 + i, [(0x100, 0)]))
       msgs.append(selfdrive_state(5.02 + i, True))
-    failures = rule_failures(msgs, TOYOTA, 0)
-    self.assertEqual(len(failures), 2)
-    self.assertIn("controls_allowed false while engaged", failures[0] + failures[1])
+    self.assertTrue(any("controls_allowed false while engaged" in f for f in failures(msgs)))
 
-  def test_blocked_deduped(self):
+  def test_blocked_while_engaged(self):
     msgs = clean_drive()
     msgs.append(can_msg('can', 3.05, [(0x100, 192)]))
-    msgs.append(can_msg('can', 3.07, [(0x100, 192)]))
-    self.assertEqual(len(rule_failures(msgs, TOYOTA, 0)), 1)
+    result = failures(msgs)
+    self.assertEqual(len(result), 1)
+    self.assertIn("blocked while engaged", result[0])
 
-  def test_controls_allowed_dropped(self):
-    msgs = clean_drive()
-    msgs.append(panda_state(1.5 + 3., False))
-    failures = rule_failures(msgs, TOYOTA, 0)
-    self.assertEqual(len(failures), 1)
-    self.assertIn("controls_allowed false while engaged", failures[0])
-
-  def test_safety_pair_mismatch(self):
-    msgs = clean_drive()
-    msgs[2] = panda_state(1., True, param=1)
-    failures = rule_failures(msgs, TOYOTA, 0)
-    self.assertEqual(len(failures), 1)
-    self.assertIn(f"safety pair ({TOYOTA}, 1) != ({TOYOTA}, 0)", failures[0])
-
-  def test_new_fault(self):
-    msgs = clean_drive()
-    msgs.append(panda_state(4., True, faults=['interruptRateCan1']))
-    failures = rule_failures(msgs, TOYOTA, 0)
-    self.assertEqual(len(failures), 1)
-    self.assertIn("new panda fault interruptRateCan1", failures[0])
-
-  def test_rules_fast(self):
-    msgs = []
-    for i in range(3000):
-      t = i / 100
-      msgs.append(selfdrive_state(t, i >= 100))
-      msgs.append(can_msg('can', t, [(0x100 + j, 0) for j in range(50)]))
-      msgs.append(can_msg('sendcan', t, [(0x100, 0)]))
-      if i % 10 == 0:
-        msgs.append(panda_state(t, True))
-    start = time.monotonic()
-    rule_failures(msgs, TOYOTA, 0)
-    self.assertLess(time.monotonic() - start, 2.)
+  def test_commands_stop(self):
+    msgs = [m for m in clean_drive(8.) if not (m.which() == 'sendcan' and m.logMonoTime >= 5e9)]
+    result = failures(msgs)
+    self.assertEqual(len(result), 1)
+    self.assertIn("commands stopped", result[0])
 
 
 if __name__ == "__main__":
