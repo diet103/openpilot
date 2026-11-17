@@ -145,6 +145,12 @@ def thin(CP: structs.CarParams, frames: list[Frame], budget: dict[int, float]) -
   return out
 
 
+def over_budget(frames: list[Frame], budget: dict[int, float]) -> list[str]:
+  seconds = len(frames) * DT
+  load = Counter(bus for f in frames for _, _, bus in f)
+  return [f"bus {bus} {load[bus] / seconds:.0f} frames/s > {rate:.0f}" for bus, rate in sorted(budget.items()) if load[bus] / seconds > rate]
+
+
 def validate(CP: structs.CarParams, frames: list[Frame]) -> list[str]:
   problems = []
   msgs = []

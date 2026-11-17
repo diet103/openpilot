@@ -8,7 +8,7 @@ from opendbc.car.toyota.values import CAR as TOYOTA, ToyotaSafetyFlags
 
 from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.test.up.oracle import load_libsafety
-from openpilot.selfdrive.test.up.replay import BUDGET, DT, _dbcs, needed_messages, thin, validate, window_frames
+from openpilot.selfdrive.test.up.replay import BUDGET, DT, _dbcs, needed_messages, over_budget, thin, validate, window_frames
 from openpilot.selfdrive.test.up.scenario import Window, load_route, safety_pair
 
 SECONDS = 20
@@ -94,6 +94,11 @@ class TestReplay(unittest.TestCase):
     out = thin(CP, frames, {0: 60.})
     self.assertEqual(positions(out, 0x386), list(range(200)))
     self.assertLess(len(positions(out, 0x7f0)), 200)
+
+  def test_over_budget(self):
+    frames = [[(0x100 + j, bytes(8), 0) for j in range(3)] for _ in range(100)]
+    self.assertEqual(over_budget(frames, {0: 230., 1: 130.}), ["bus 0 300 frames/s > 230"])
+    self.assertEqual(over_budget(frames, {0: 300.}), [])
 
   def test_window_frames_drops_echoes(self):
     msgs = [can_msg(0., [(0x10, b'a', 0), (0x11, b'b', 128), (0x12, b'c', 192), (0x13, b'e', 4)]), can_msg(0.015, [(0x10, b'd', 1)])]

@@ -167,7 +167,7 @@ def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, f
   # (scenario line, or a coverage gap if only thinning breaks the replay, stage times)
   # replay and oracle import this module
   from openpilot.selfdrive.test.up.oracle import command_mismatches, run_safety, state_mismatches
-  from openpilot.selfdrive.test.up.replay import DT, needed_messages, thin, validate, window_frames
+  from openpilot.selfdrive.test.up.replay import DT, needed_messages, over_budget, thin, validate, window_frames
 
   s = scenario
   times: Counter[str] = Counter()
@@ -186,10 +186,11 @@ def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, f
 
   t = time.monotonic()
   problems = validate(s.CP, frames)
-  lane_budget = bool(problems) and not validate(s.CP, needed_frames)
+  # a replay over the lane's rate or one only thinning breaks can't run on the station
+  lane_problems = over_budget(frames, budget) or (problems if problems and not validate(s.CP, needed_frames) else [])
   times["validate"] += time.monotonic() - t
-  if lane_budget:
-    return None, f"mode {s.mode} param {s.param}: lane budget: {', '.join(problems)}", times
+  if lane_problems:
+    return None, f"mode {s.mode} param {s.param}: lane budget: {', '.join(lane_problems)}", times
 
   t = time.monotonic()
   # the oracle sees the same window of the recording, in the same time base
