@@ -46,6 +46,7 @@ def clean_drive(duration=5.):
     t = 2. + i
     msgs.append(can_msg('sendcan', t, [(0x100, 0)]))
     msgs.append(can_msg('can', t + 0.01, [(0x100, 128)]))
+    msgs.append(selfdrive_state(t + 0.02, True))
     msgs.append(panda_state(t + 0.5, True))
   return msgs
 
@@ -72,7 +73,38 @@ class TestRules(unittest.TestCase):
     msgs = [m for m in clean_drive() if m.which() != 'sendcan']
     failures = rule_failures(msgs, TOYOTA, 0)
     self.assertEqual(len(failures), 1)
-    self.assertIn("no commands while engaged", failures[0])
+    self.assertIn("commands stopped", failures[0])
+
+  def test_commands_stop_midway(self):
+    msgs = [m for m in clean_drive(8.) if not (m.which() == 'sendcan' and m.logMonoTime >= 5 * 1e9)]
+    failures = rule_failures(msgs, TOYOTA, 0)
+    self.assertEqual(len(failures), 1)
+    self.assertIn("commands stopped", failures[0])
+
+  def test_brake_disengage(self):
+    msgs = clean_drive(3.)
+    msgs.append(panda_state(5., False))
+    msgs.append(can_msg('can', 5., [(0x100, 192)]))
+    msgs.append(can_msg('can', 5., [(0x101, 192)]))
+    msgs.append(selfdrive_state(5.02, False))
+    self.assertEqual(rule_failures(msgs, TOYOTA, 0), [])
+
+  def test_stuck_engaged_after_drop(self):
+    msgs = clean_drive(3.)
+    msgs.append(panda_state(5., False))
+    msgs.append(can_msg('can', 5., [(0x100, 192)]))
+    for i in range(3):
+      msgs.append(can_msg('sendcan', 5.01 + i, [(0x100, 0)]))
+      msgs.append(selfdrive_state(5.02 + i, True))
+    failures = rule_failures(msgs, TOYOTA, 0)
+    self.assertEqual(len(failures), 2)
+    self.assertIn("controls_allowed false while engaged", failures[0] + failures[1])
+
+  def test_blocked_deduped(self):
+    msgs = clean_drive()
+    msgs.append(can_msg('can', 3.05, [(0x100, 192)]))
+    msgs.append(can_msg('can', 3.07, [(0x100, 192)]))
+    self.assertEqual(len(rule_failures(msgs, TOYOTA, 0)), 1)
 
   def test_controls_allowed_dropped(self):
     msgs = clean_drive()
