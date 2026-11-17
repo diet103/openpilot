@@ -210,7 +210,7 @@ def build_candidates(routes) -> tuple[dict[tuple[int, int], list[Scenario]], lis
 def source_tree() -> str:
   # opendbc and this harness, so a change to either rebuilds the list
   ids = []
-  for path in ("opendbc_repo", "openpilot/selfdrive/test/up"):
+  for path in ("opendbc_repo", "openpilot/selfdrive/test/onroad_cars"):
     ids.append(subprocess.check_output(["git", "rev-parse", f"HEAD:{path}"], cwd=BASEDIR, text=True).strip())
   return "-".join(ids)
 

@@ -7,9 +7,9 @@ import time
 import openpilot.cereal.messaging as messaging
 from openpilot.common.basedir import BASEDIR
 from openpilot.selfdrive.test.helpers import set_params_enabled
-from openpilot.selfdrive.test.up.replay import DT, Frame
-from openpilot.selfdrive.test.up.rules import NO_CAR_MODES
-from openpilot.selfdrive.test.up.scenario import LENGTH, Scenario
+from openpilot.selfdrive.test.onroad_cars.replay import DT, Frame
+from openpilot.selfdrive.test.onroad_cars.rules import NO_CAR_MODES
+from openpilot.selfdrive.test.onroad_cars.scenario import LENGTH, Scenario
 
 ONROAD_LIMIT = 120.
 # after onroad, a car that doesn't get engageable fails, the rig is fine
