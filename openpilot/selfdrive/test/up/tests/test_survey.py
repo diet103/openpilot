@@ -21,7 +21,7 @@ def can_start(t):
 
 
 def scenario(name, CP):
-  return Scenario(f"{name}|2024-01-01--00-00-00", 0, PLATFORM, *safety_pair(CP), Window(0., 30.), CP)
+  return Scenario(f"{name}|2024-01-01--00-00-00", 0, PLATFORM, *safety_pair(CP), Window(0., 30.), 5., CP)
 
 
 class TestSurvey(unittest.TestCase):

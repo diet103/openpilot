@@ -34,6 +34,8 @@ class Scenario:
   mode: int
   param: int
   window: Window
+  # the panda's engage edge, in segment seconds
+  rise: float
   CP: structs.CarParams
 
 
@@ -64,7 +66,8 @@ def can_span(msgs: Iterable) -> float:
   return (max(times) - min(times)) / 1e9 if times else 0.
 
 
-def pick_window(samples: list[tuple[float, bool]], can_end: float) -> Window | None:
+def pick_window(samples: list[tuple[float, bool]], can_end: float) -> tuple[Window, float] | None:
+  # the window and its engage edge
   best = None
   best_len = 0.
   # (first not allowed sample before the rise, rise) of the current stretch
@@ -85,11 +88,12 @@ def pick_window(samples: list[tuple[float, bool]], can_end: float) -> Window | N
       # the window starts where the panda is not allowed, after any earlier stretch
       start = max(0., before, min(rise - LEAD, can_end - LENGTH))
       if length >= MIN_ENGAGED and length > best_len and start + LENGTH <= can_end:
-        best, best_len = start, length
+        best, best_len = (start, rise), length
       stretch = None
   if best is None:
     return None
-  return Window(best, best + LENGTH)
+  start, rise = best
+  return Window(start, start + LENGTH), rise
 
 
 def safety_pair(CP: structs.CarParams) -> tuple[int, int]:
@@ -155,9 +159,10 @@ def build_candidates(routes, load: Callable[[CarTestRoute], tuple[int, structs.C
     if not samples:
       gaps.append(f"{who}: no panda state logged")
       continue
-    window = pick_window(samples, span)
-    if window is not None:
-      scenarios.setdefault(mode_param, []).append(Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, CP))
+    picked = pick_window(samples, span)
+    if picked is not None:
+      window, rise = picked
+      scenarios.setdefault(mode_param, []).append(Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, rise, CP))
     elif samples[0][1]:
       engaged_from_start.add(mode_param)
 
