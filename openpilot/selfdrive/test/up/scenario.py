@@ -1,10 +1,15 @@
+import argparse
+import multiprocessing
+import os
+from collections import deque
 from collections.abc import Callable, Iterable
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.logreader import LogReader as OpendbcLogReader
-from opendbc.car.tests.routes import CarTestRoute
+from opendbc.car.tests.routes import CarTestRoute, routes as test_routes
 from opendbc.car.tests.test_models import TestCarModelBase, get_cached_segment
 
 from openpilot.tools.lib.logreader import LogReader
@@ -134,3 +139,53 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, tuple[int,
   for mode, param in sorted(seen_pairs - scenarios.keys()):
     gaps.append(f"mode {mode} param {param}: no engaged stretch of {MIN_ENGAGED:g} s in any route")
   return list(scenarios.values()), gaps
+
+
+def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, float]) -> str:
+  # replay and oracle import this module
+  from openpilot.selfdrive.test.up.oracle import command_mismatches, run_safety, state_mismatches
+  from openpilot.selfdrive.test.up.replay import DT, needed_messages, thin, validate, window_frames
+
+  s = scenario
+  _, _, msgs = load_route(route._replace(segment=s.segment))
+  frames = window_frames(msgs, s.window)
+  needed = needed_messages(s.car_model, s.mode, s.param, frames)
+  frames = thin([[f for f in frame if (f[2], f[0]) in needed] for frame in frames], budget)
+  seconds = len(frames) * DT
+  rates = " ".join(f"{bus}:{sum(b == bus for f in frames for _, _, b in f) / seconds:.0f}" for bus in sorted(budget))
+  problems = validate(s.car_model, s.mode, s.param, frames)
+
+  # the oracle sees the same window of the recording, in the same time base
+  first = min(m.logMonoTime for m in msgs if m.which() == 'can')
+  logged = [m for m in msgs if s.window.start <= (m.logMonoTime - first) / 1e9 < s.window.end]
+  run = run_safety(logged, s.mode, s.param)
+  where = f"{s.mode} {s.param} {s.car_model} {s.route} {s.window.start:.0f}-{s.window.end:.0f}s"
+  checks = f"validate {', '.join(problems) or 'ok'} commands {len(command_mismatches(run))} state {len(state_mismatches(run, logged))}"
+  return f"{where} frames/s {rates} {checks}"
+
+
+def pool() -> ProcessPoolExecutor:
+  return ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("spawn"))
+
+
+def main() -> None:
+  parser = argparse.ArgumentParser(description="list every test route's scenario and coverage gaps")
+  parser.add_argument("--budget", default="230,130,60", help="frames/s of the station's lanes for buses 0,1,2")
+  args = parser.parse_args()
+  budget = dict(enumerate(float(r) for r in args.budget.split(",")))
+
+  with pool() as p:
+    loads = deque(p.submit(load_route, r) for r in test_routes)
+    scenarios, gaps = build_scenarios(test_routes, load=lambda _: loads.popleft().result())
+    by_name = {(r.route, str(r.car_model)): r for r in test_routes}
+    for line in p.map(scenario_report, scenarios, [by_name[(s.route, s.car_model)] for s in scenarios], [budget] * len(scenarios)):
+      print(line, flush=True)
+
+  pair_gaps = [g for g in gaps if g.startswith("mode ")]
+  print(f"{len(scenarios)} scenarios, {len(pair_gaps)} pairs in coverage gaps")
+  for gap in gaps:
+    print(gap)
+
+
+if __name__ == "__main__":
+  main()
