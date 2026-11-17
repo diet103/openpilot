@@ -134,6 +134,13 @@ class TestReplay(unittest.TestCase):
     problems = validate(CP, thin(CP, frames, {0: 5.}))
     self.assertTrue(any("panda" in p or "can't parse" in p for p in problems), problems)
 
+  def test_validate_flags_rx_invalid_after_startup(self):
+    # a checked message missing for the first second and again later, the panda's RX checks are invalid at both
+    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    gone = [i < 110 or 1000 <= i < 1200 for i in range(len(frames))]
+    frames = [[m for m in frame if not (drop and (m[2], m[0]) == (0, 0x260))] for frame, drop in zip(frames, gone, strict=True)]
+    self.assertIn("panda RX checks invalid", validate(CP, frames))
+
   def test_validate_flags_starved_radar(self):
     CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
     frames = [[m for m in frame if m[2] != 1] for frame in frames]

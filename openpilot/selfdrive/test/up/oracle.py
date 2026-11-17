@@ -23,7 +23,8 @@ class SafetyRun:
   commands: list[tuple[float, int, int, bool, bool]] = field(default_factory=list)
   samples: list[tuple[float, bool, bool, int, int]] = field(default_factory=list)
   rx_rejected: list[tuple[float, int, int]] = field(default_factory=list)
-  rx_checks_invalid_at: float | None = None
+  # every tick the panda's RX checks are invalid at, the tick recomputes them
+  rx_checks_invalid: list[float] = field(default_factory=list)
   # libsafety's controls_allowed from the first can message on, (t, value) at each change
   controls_allowed: list[tuple[float, bool]] = field(default_factory=list)
 
@@ -108,8 +109,8 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
       # the panda checks the heartbeat before its safety tick, main.c
       safety.safety_heartbeat_check()
       safety.safety_tick()
-      if run.rx_checks_invalid_at is None and safety.safety_a.state.safety_rx_checks_invalid:
-        run.rx_checks_invalid_at = float(next_tick)
+      if safety.safety_a.state.safety_rx_checks_invalid:
+        run.rx_checks_invalid.append(float(next_tick))
       note_controls(float(next_tick))
       next_tick += 1
 

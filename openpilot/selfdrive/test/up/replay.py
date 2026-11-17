@@ -162,7 +162,7 @@ def validate(CP: structs.CarParams, frames: list[Frame]) -> list[str]:
     msgs.append(msg)
   run = run_safety(msgs, *safety_pair(CP))
   problems += sorted({f"panda rejects 0x{addr:x} bus {bus}" for _, addr, bus in run.rx_rejected})
-  if run.rx_checks_invalid_at is not None and run.rx_checks_invalid_at > STARTUP:
+  if any(t > STARTUP for t in run.rx_checks_invalid):
     problems.append("panda RX checks invalid")
 
   car, radar = _parsers(CP)
