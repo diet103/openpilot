@@ -13,6 +13,7 @@ from opendbc.car.toyota.values import CAR as TOYOTA, ToyotaSafetyFlags
 from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.test.up.oracle import load_libsafety
 from openpilot.selfdrive.test.up.replay import (BUDGET, DT, Replay, _dbcs, _values, build_replay, needed_frames, needed_messages, over_budget, pick_replay,
+                                                pick_scenarios,
                                                 thin, validate, window_frames)
 from openpilot.selfdrive.test.up.scenario import Scenario, Window, load_route, safety_pair
 
@@ -237,6 +238,23 @@ class TestReplay(unittest.TestCase):
     with mock.patch("openpilot.selfdrive.test.up.replay.build_replay", build(set())):
       s, _, _ = pick_replay([a, b], BUDGET, load)
     self.assertIs(s, a)
+
+
+  def test_pick_scenarios(self):
+    a, b, c = (Scenario(f"{x}|2024-01-01--00-00-00", 0, "CAR", 1, i, WINDOW, plain_cp()) for i, x in enumerate("abc"))
+    candidates = {(1, 0): [a], (1, 1): [b], (1, 2): [c]}
+
+    def pick(cands, budget):
+      s = cands[0]
+      if s is b:
+        return s, [], Replay([], [], ["lane"])
+      if s is c:
+        raise OSError("gone")
+      return s, [], Replay([], [], [])
+
+    scenarios, gaps = pick_scenarios([], BUDGET, lambda routes: (candidates, ["early"]), pick)
+    self.assertEqual(scenarios, [a])
+    self.assertEqual(gaps, ["early", "mode 1 param 1: lane budget: lane", f"CAR {c.route}: OSError('gone')"])
 
 
 if __name__ == "__main__":

@@ -11,8 +11,8 @@ from opendbc.car.tests.test_models import get_cached_segment
 from opendbc.car.toyota.values import CAR as TOYOTA
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.scenario import (Scenario, Window, build_candidates, build_scenarios, can_span, car_params, engaged_samples, load_log,
-                                                  load_route, pick_window, safety_pair)
+from openpilot.selfdrive.test.up.scenario import (Scenario, Window, build_candidates, build_scenarios, cached_scenarios, can_span, car_params,
+                                                  engaged_samples, load_log, load_route, pick_window, safety_pair)
 
 ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")
 ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")
@@ -153,6 +153,42 @@ class TestScenario(unittest.TestCase):
     candidates, gaps = build_candidates([ROUTE_A, ROUTE_B], fake_load({ROUTE_A.route: engaged, ROUTE_B.route: engaged}))
     self.assertEqual([s.route for s in candidates[(1, 2)]], [ROUTE_A.route, ROUTE_B.route])
     self.assertEqual(gaps, [])
+
+
+class TestCachedScenarios(unittest.TestCase):
+  def setUp(self):
+    self.calls = 0
+    self.tmp = tempfile.TemporaryDirectory()
+    self.addCleanup(self.tmp.cleanup)
+    self.dir = Path(self.tmp.name) / "up_scenarios"
+
+  def build(self, routes):
+    self.calls += 1
+    return [Scenario("a|2024-01-01--00-00-00", 0, "CAR", 1, 2, Window(0., 30.), structs.CarParams())], ["gap"]
+
+  def test_cache_hit(self):
+    first = cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
+    second = cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
+    self.assertEqual(self.calls, 1)
+    self.assertEqual(second[1], ["gap"])
+    # the CP comes back as a reader, compare by content
+    self.assertEqual([(s.route, s.window, s.CP.to_bytes()) for s in first[0]], [(s.route, s.window, s.CP.to_bytes()) for s in second[0]])
+
+  def test_cache_key_changes(self):
+    cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
+    cached_scenarios(self.dir, [], self.build, tree=lambda: "t2")
+    cached_scenarios(self.dir, [], self.build, budget={0: 230., 1: 130., 2: 60.}, tree=lambda: "t1")
+    self.assertEqual(self.calls, 3)
+
+  def test_cache_corrupt(self):
+    cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
+    (path,) = self.dir.glob("*.pkl")
+    path.write_bytes(b"garbage")
+    scenarios, gaps = cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
+    self.assertEqual(self.calls, 2)
+    self.assertEqual(len(scenarios), 1)
+    cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
+    self.assertEqual(self.calls, 2)
 
 
 if __name__ == "__main__":

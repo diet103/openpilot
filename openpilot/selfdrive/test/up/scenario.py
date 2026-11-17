@@ -1,3 +1,7 @@
+import os
+import pickle
+import subprocess
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -5,9 +9,10 @@ from pathlib import Path
 from opendbc.car import structs
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.logreader import LogReader as OpendbcLogReader
-from opendbc.car.tests.routes import CarTestRoute
+from opendbc.car.tests.routes import CarTestRoute, routes as test_routes
 from opendbc.car.tests.test_models import TestCarModelBase, get_cached_segment
 
+from openpilot.common.basedir import BASEDIR
 from openpilot.tools.lib.logreader import LogReader
 
 LEAD = 5.
@@ -167,3 +172,29 @@ def build_candidates(routes, load: Callable[[CarTestRoute], tuple[int, structs.C
 def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.CarParams, list]] = load_route) -> tuple[list[Scenario], list[str]]:
   candidates, gaps = build_candidates(routes, load)
   return [c[0] for c in candidates.values()], gaps
+
+
+def opendbc_tree() -> str:
+  return subprocess.check_output(["git", "rev-parse", "HEAD:opendbc_repo"], cwd=BASEDIR, text=True).strip()
+
+
+def cached_scenarios(cache_dir: Path, routes=test_routes, build: Callable = build_scenarios, budget: dict[int, float] | None = None,
+                     tree: Callable[[], str] = opendbc_tree) -> tuple[list[Scenario], list[str]]:
+  # the list only changes with opendbc or the lane budget it was picked for
+  lanes = "-".join(f"{rate:g}" for rate in (budget or {}).values())
+  path = cache_dir / f"{tree()}-{lanes}.pkl"
+  if path.exists():
+    try:
+      scenarios, gaps = pickle.loads(path.read_bytes())
+      return scenarios, gaps
+    except Exception:
+      pass
+
+  scenarios, gaps = build(routes)
+  cache_dir.mkdir(parents=True, exist_ok=True)
+  # write whole or not at all, runs share the cache dir
+  fd, tmp = tempfile.mkstemp(dir=cache_dir)
+  with os.fdopen(fd, "wb") as f:
+    pickle.dump((scenarios, gaps), f)
+  os.replace(tmp, path)
+  return scenarios, gaps

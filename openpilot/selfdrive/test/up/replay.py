@@ -13,7 +13,7 @@ from opendbc.car.car_helpers import interfaces
 from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.pandad import can_capnp_to_list
 from openpilot.selfdrive.test.up.oracle import PANDA_BUSES, load_libsafety, run_safety
-from openpilot.selfdrive.test.up.scenario import Scenario, Window, load_log, safety_pair
+from openpilot.selfdrive.test.up.scenario import Scenario, Window, build_candidates, load_log, safety_pair
 
 # the UP's can_replay frame period
 DT = 0.01
@@ -258,3 +258,21 @@ def pick_replay(candidates: list[Scenario], budget: dict[int, float],
     if not replay.lane_problems:
       break
   return s, msgs, replay
+
+
+def pick_scenarios(routes, budget: dict[int, float], build: Callable = build_candidates, pick: Callable = pick_replay) -> tuple[list[Scenario], list[str]]:
+  # what a rack run drives: each pair's scenario after the lane budget fallback, and the gaps
+  candidates, gaps = build(routes)
+  scenarios = []
+  for pair_candidates in candidates.values():
+    try:
+      s, _, replay = pick(pair_candidates, budget)
+    except Exception as e:
+      first = pair_candidates[0]
+      gaps.append(f"{first.car_model} {first.route}: {e!r}")
+      continue
+    if replay.lane_problems:
+      gaps.append(f"mode {s.mode} param {s.param}: lane budget: {', '.join(replay.lane_problems)}")
+    else:
+      scenarios.append(s)
+  return scenarios, gaps
