@@ -78,7 +78,7 @@ def load_route(route: CarTestRoute) -> tuple[int, list]:
   for segment in segments:
     try:
       path = get_cached_segment(route.route, segment)
-      return segment, list(LogReader(str(path)))
+      return segment, list(LogReader(str(path), sort_by_time=True))
     except (OSError, AssertionError):
       pass
   raise OSError(f"segments {segments} not found")
