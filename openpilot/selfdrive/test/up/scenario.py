@@ -1,7 +1,8 @@
 import argparse
 import multiprocessing
 import os
-from collections import deque
+import time
+from collections import Counter, deque
 from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from openpilot.tools.lib.logreader import LogReader
 LEAD = 5.
 LENGTH = 30.
 MIN_ENGAGED = 10.
+WORKERS = os.cpu_count() or 1
 
 
 @dataclass(frozen=True)
@@ -155,50 +157,90 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.Ca
   return list(scenarios.values()), gaps
 
 
-def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, float]) -> str:
+def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, float]) -> tuple[str, Counter[str]]:
   # replay and oracle import this module
   from openpilot.selfdrive.test.up.oracle import command_mismatches, run_safety, state_mismatches
   from openpilot.selfdrive.test.up.replay import DT, needed_messages, thin, validate, window_frames
 
   s = scenario
+  times: Counter[str] = Counter()
+  t = time.monotonic()
   _, _, msgs = load_route(route._replace(segment=s.segment))
+  times["load"] += time.monotonic() - t
+
+  t = time.monotonic()
   frames = window_frames(msgs, s.window)
   needed = needed_messages(s.CP, frames)
   frames = thin(s.CP, [[f for f in frame if (f[2], f[0]) in needed] for frame in frames], budget)
+  times["frames"] += time.monotonic() - t
   seconds = len(frames) * DT
   rates = " ".join(f"{bus}:{sum(b == bus for f in frames for _, _, b in f) / seconds:.0f}" for bus in sorted(budget))
-  problems = validate(s.CP, frames)
 
+  t = time.monotonic()
+  problems = validate(s.CP, frames)
+  times["validate"] += time.monotonic() - t
+
+  t = time.monotonic()
   # the oracle sees the same window of the recording, in the same time base
   first = min(m.logMonoTime for m in msgs if m.which() == 'can')
   logged = [m for m in msgs if s.window.start <= (m.logMonoTime - first) / 1e9 < s.window.end]
   run = run_safety(logged, s.mode, s.param)
+  commands, state = command_mismatches(run), state_mismatches(run, logged)
+  times["oracle"] += time.monotonic() - t
+
   where = f"{s.mode} {s.param} {s.car_model} {s.route} {s.window.start:.0f}-{s.window.end:.0f}s"
-  checks = f"validate {', '.join(problems) or 'ok'} commands {len(command_mismatches(run))} state {len(state_mismatches(run, logged))}"
-  return f"{where} frames/s {rates} {checks}"
+  checks = f"validate {', '.join(problems) or 'ok'} commands {len(commands)} state {len(state)}"
+  return f"{where} frames/s {rates} {checks}", times
+
+
+def timed_load(route: CarTestRoute) -> tuple[float, tuple[int, structs.CarParams, list] | Exception]:
+  t = time.monotonic()
+  try:
+    loaded: tuple[int, structs.CarParams, list] | Exception = load_route(route)
+  except Exception as e:
+    loaded = e
+  return time.monotonic() - t, loaded
 
 
 def pool() -> ProcessPoolExecutor:
-  return ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("spawn"))
+  return ProcessPoolExecutor(WORKERS, mp_context=multiprocessing.get_context("spawn"))
 
 
 def main() -> None:
+  from openpilot.selfdrive.test.up.replay import BUDGET
+
   parser = argparse.ArgumentParser(description="list every test route's scenario and coverage gaps")
-  parser.add_argument("--budget", default="230,130,60", help="frames/s of the station's lanes for buses 0,1,2")
+  parser.add_argument("--budget", help="frames/s of the station's lanes for buses 0,1,2, default " + ",".join(f"{r:g}" for r in BUDGET.values()))
   args = parser.parse_args()
-  budget = dict(enumerate(float(r) for r in args.budget.split(",")))
+  budget = dict(enumerate(float(r) for r in args.budget.split(","))) if args.budget else BUDGET
+
+  start = time.monotonic()
+  times: Counter[str] = Counter()
+
+  def load(_: CarTestRoute) -> tuple[int, structs.CarParams, list]:
+    seconds, loaded = loads.popleft().result()
+    times["load"] += seconds
+    if isinstance(loaded, Exception):
+      raise loaded
+    return loaded
 
   with pool() as p:
-    loads = deque(p.submit(load_route, r) for r in test_routes)
-    scenarios, gaps = build_scenarios(test_routes, load=lambda _: loads.popleft().result())
+    loads = deque(p.submit(timed_load, r) for r in test_routes)
+    t = time.monotonic()
+    scenarios, gaps = build_scenarios(test_routes, load=load)
+    times["build_scenarios"] += time.monotonic() - t
     by_name = {(r.route, str(r.car_model)): r for r in test_routes}
-    for line in p.map(scenario_report, scenarios, [by_name[(s.route, s.car_model)] for s in scenarios], [budget] * len(scenarios)):
+    for line, stage_times in p.map(scenario_report, scenarios, [by_name[(s.route, s.car_model)] for s in scenarios], [budget] * len(scenarios)):
       print(line, flush=True)
+      times.update(stage_times)
 
   pair_gaps = [g for g in gaps if g.startswith("mode ")]
   print(f"{len(scenarios)} scenarios, {len(pair_gaps)} pairs in coverage gaps")
   for gap in gaps:
     print(gap)
+  # build_scenarios is wall time in this process and includes waiting on loads, the other stages are summed over workers
+  stages = ", ".join(f"{name} {times[name]:.1f} s" for name in ("load", "build_scenarios", "frames", "validate", "oracle"))
+  print(f"timing: {WORKERS} workers, run {time.monotonic() - start:.1f} s, {stages}")
 
 
 if __name__ == "__main__":
