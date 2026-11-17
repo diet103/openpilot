@@ -62,10 +62,15 @@ class TestScenario(unittest.TestCase):
 
   def test_window_needs_engage_edge(self):
     self.assertIsNone(pick_window(samples((0, 50)), 70.))
-    self.assertEqual(pick_window(samples((0, 50), (55, 70)), 70.), Window(40., 70.))
+    self.assertEqual(pick_window(samples((0, 20), (30, 50)), 70.), Window(25., 55.))
     scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([True] * 40)}))
     self.assertEqual(scenarios, [])
     self.assertEqual(gaps, ["mode 1 param 2: no engage edge in segment"])
+
+  def test_window_starts_disengaged(self):
+    # engaged until 41.7 s, the window can't reach back to 30 s while the panda is still allowed
+    self.assertIsNone(pick_window(samples((0, 42), (44, 70)), 70.))
+    self.assertEqual(pick_window(samples((0, 30), (34, 60)), 70.), Window(30., 60.))
 
   def test_window_too_short(self):
     self.assertIsNone(pick_window(samples((3, 12)), 70.))

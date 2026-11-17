@@ -69,23 +69,29 @@ def can_span(msgs: Iterable) -> float:
 def pick_window(samples: list[tuple[float, bool]], can_end: float) -> Window | None:
   best = None
   best_len = 0.
-  rise = None
+  # (first not allowed sample before the rise, rise) of the current stretch
+  stretch = None
+  down = None
   # a stretch starts where the panda goes from not allowed to allowed, the rack's panda starts disengaged
   # and has to engage from the replay, so one engaged since the first sample has no usable start
   # a stretch ends at the first sample that is not engaged, or at the last sample
   for i, (t, allowed) in enumerate(samples):
-    if allowed and rise is None and i > 0 and not samples[i - 1][1]:
-      rise = t
+    if allowed and stretch is None and down is not None:
+      stretch = (down, t)
+    if not allowed and (i == 0 or samples[i - 1][1]):
+      down = t
     last = i == len(samples) - 1
-    if rise is not None and (not allowed or last):
+    if stretch is not None and (not allowed or last):
+      before, rise = stretch
       length = (can_end if allowed else t) - rise
-      if length >= MIN_ENGAGED and length > best_len:
-        best, best_len = rise, length
-      rise = None
+      # the window starts where the panda is not allowed, after any earlier stretch
+      start = max(0., before, min(rise - LEAD, can_end - LENGTH))
+      if length >= MIN_ENGAGED and length > best_len and start + LENGTH <= can_end:
+        best, best_len = start, length
+      stretch = None
   if best is None:
     return None
-  start = max(0., min(best - LEAD, can_end - LENGTH))
-  return Window(start, start + LENGTH)
+  return Window(best, best + LENGTH)
 
 
 def safety_pair(CP: structs.CarParams) -> tuple[int, int]:
