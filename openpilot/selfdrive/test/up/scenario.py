@@ -1,8 +1,11 @@
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
+from opendbc.car.car_helpers import interfaces
+from opendbc.car.logreader import LogReader as OpendbcLogReader
 from opendbc.car.tests.routes import CarTestRoute
-from opendbc.car.tests.test_models import get_cached_segment
+from opendbc.car.tests.test_models import TestCarModelBase, get_cached_segment
 
 from openpilot.tools.lib.logreader import LogReader
 
@@ -64,44 +67,45 @@ def pick_window(samples: list[tuple[float, bool]]) -> Window | None:
   return Window(start, start + LENGTH)
 
 
-def safety_pair(msgs: Iterable) -> tuple[int, int] | None:
-  pair = None
-  for m in msgs:
-    if m.which() == 'carParams' and len(m.carParams.safetyConfigs):
-      cfg = m.carParams.safetyConfigs[-1]
-      pair = (int(cfg.safetyModel.raw), int(cfg.safetyParam))
-  return pair
+def safety_pair(route: CarTestRoute, path: Path) -> tuple[int, int]:
+  cls = type("R", (TestCarModelBase,), {"test_route": route, "platform": route.car_model})
+  car_fw, _, alpha_long = cls.get_testing_data_from_logreader(OpendbcLogReader(str(path), only_union_types=True, sort_by_time=True))
+  CP = interfaces[cls.platform].get_params(cls.platform, cls.fingerprint, car_fw, alpha_long, False, docs=False)
+  cfg = CP.safetyConfigs[-1]
+  return int(cfg.safetyModel.raw), int(cfg.safetyParam)
 
 
-def load_route(route: CarTestRoute) -> tuple[int, list]:
+def load_route(route: CarTestRoute) -> tuple[int, Path, list]:
   segments = (2, 1, 0) if route.segment is None else (route.segment,)
   for segment in segments:
     try:
       path = get_cached_segment(route.route, segment)
-      return segment, list(LogReader(str(path), sort_by_time=True))
+      return segment, path, list(LogReader(str(path), sort_by_time=True))
     except (OSError, AssertionError):
       pass
   raise OSError(f"segments {segments} not found")
 
 
-def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, list]] = load_route) -> tuple[list[Scenario], list[str]]:
+def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, Path, list]] = load_route,
+                    pair: Callable[[CarTestRoute, Path], tuple[int, int]] = safety_pair) -> tuple[list[Scenario], list[str]]:
   scenarios: dict[tuple[int, int], Scenario] = {}
   seen_pairs: set[tuple[int, int]] = set()
   gaps = []
   for route in routes:
     who = f"{route.car_model} {route.route}"
     try:
-      segment, msgs = load(route)
+      segment, path, msgs = load(route)
     except Exception as e:
       gaps.append(f"{who}: can't load ({e})")
       continue
 
-    pair = safety_pair(msgs)
-    if pair is None:
-      gaps.append(f"{who}: no carParams safety config logged")
+    try:
+      mode_param = pair(route, path)
+    except Exception as e:
+      gaps.append(f"{who}: can't derive safety config: {e!r}")
       continue
-    seen_pairs.add(pair)
-    if pair in scenarios:
+    seen_pairs.add(mode_param)
+    if mode_param in scenarios:
       continue
 
     samples = engaged_samples(msgs)
@@ -110,7 +114,7 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, list]] = l
       continue
     window = pick_window(samples)
     if window is not None:
-      scenarios[pair] = Scenario(route.route, segment, route.car_model, pair[0], pair[1], window)
+      scenarios[mode_param] = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window)
 
   for mode, param in sorted(seen_pairs - scenarios.keys()):
     gaps.append(f"mode {mode} param {param}: no engaged stretch of {MIN_ENGAGED:g} s in any route")
