@@ -22,6 +22,8 @@ class Recording:
   # message index and enabled of each selfdriveState
   sd_idx: list[int]
   sd_enabled: list[bool]
+  # engaged span number of each selfdriveState, counting enable edges
+  sd_span: list[int]
 
   def t(self, i: int) -> float:
     return (self.msgs[i].logMonoTime - self.start) / 1e9
@@ -34,6 +36,10 @@ class Recording:
   def enabled_at(self, i: int) -> bool:
     pos = bisect.bisect_right(self.sd_idx, i) - 1
     return pos >= 0 and self.sd_enabled[pos]
+
+  def span_at(self, i: int) -> int:
+    pos = bisect.bisect_right(self.sd_idx, i) - 1
+    return self.sd_span[pos] if pos >= 0 else 0
 
   def stays_enabled(self, i: int) -> bool:
     # the next selfdriveState after message i is still enabled, or there is none
@@ -59,30 +65,25 @@ def _load(msgs: list) -> Recording:
   msgs = sorted(msgs, key=lambda m: m.logMonoTime)
   sd_idx = []
   sd_enabled = []
+  sd_span = []
+  span = 0
+  prev = False
   for i, msg in enumerate(msgs):
     if msg.which() == 'selfdriveState':
+      enabled = msg.selfdriveState.enabled
+      if enabled and not prev:
+        span += 1
+      prev = enabled
       sd_idx.append(i)
-      sd_enabled.append(msg.selfdriveState.enabled)
-  return Recording(msgs, msgs[0].logMonoTime if msgs else 0, sd_idx, sd_enabled)
+      sd_enabled.append(enabled)
+      sd_span.append(span)
+  return Recording(msgs, msgs[0].logMonoTime if msgs else 0, sd_idx, sd_enabled, sd_span)
 
 
 def _panda_states(rec: Recording):
   for i, msg in enumerate(rec.msgs):
     if msg.which() == 'pandaStates' and len(msg.pandaStates) > 0:
       yield i, msg.pandaStates[0]
-
-
-def _span_number(rec: Recording, i: int) -> int:
-  # which engaged span message i is in, by the number of enable edges before it
-  edges = 0
-  prev = False
-  for pos, idx in enumerate(rec.sd_idx):
-    if idx > i:
-      break
-    if rec.sd_enabled[pos] and not prev:
-      edges += 1
-    prev = rec.sd_enabled[pos]
-  return edges
 
 
 def _not_engaged(rec: Recording) -> list[tuple[float, str]]:
@@ -106,12 +107,14 @@ def _blocked_while_engaged(rec: Recording) -> list[tuple[float, str]]:
   failures = []
   reported = set()
   for i, msg in enumerate(rec.msgs):
-    if msg.which() != 'can' or not rec.enabled_at(i) or not rec.stays_enabled(i):
+    if msg.which() != 'can':
       continue
     for frame in msg.can:
       bus = frame.src - BLOCKED
-      key = (_span_number(rec, i), frame.address, bus)
-      if bus in range(BUSES) and key not in reported:
+      if bus not in range(BUSES) or not rec.enabled_at(i) or not rec.stays_enabled(i):
+        continue
+      key = (rec.span_at(i), frame.address, bus)
+      if key not in reported:
         reported.add(key)
         t = rec.t(i)
         failures.append((t, f"t={t:.2f} blocked while engaged, addr {frame.address:#x} bus {bus}"))
@@ -124,13 +127,15 @@ def _controls_allowed_dropped(rec: Recording) -> list[tuple[float, str]]:
   for i, state in _panda_states(rec):
     if state.controlsAllowed or not rec.enabled_at(i) or not rec.stays_enabled(i):
       continue
-    span = _span_number(rec, i)
+    span = rec.span_at(i)
+    if span in reported:
+      continue
     # enabled for longer than the engage limit
     pos = bisect.bisect_right(rec.sd_idx, i) - 1
     while pos > 0 and rec.sd_enabled[pos - 1]:
       pos -= 1
     t = rec.t(i)
-    if t - rec.t(rec.sd_idx[pos]) > ENGAGE_LIMIT and span not in reported:
+    if t - rec.t(rec.sd_idx[pos]) > ENGAGE_LIMIT:
       reported.add(span)
       failures.append((t, f"t={t:.2f} controls_allowed false while engaged"))
   return failures

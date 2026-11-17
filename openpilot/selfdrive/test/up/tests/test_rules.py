@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from opendbc.car.structs import CarParams
@@ -126,6 +127,19 @@ class TestRules(unittest.TestCase):
     failures = rule_failures(msgs, TOYOTA, 0)
     self.assertEqual(len(failures), 1)
     self.assertIn("new panda fault interruptRateCan1", failures[0])
+
+  def test_rules_fast(self):
+    msgs = []
+    for i in range(3000):
+      t = i / 100
+      msgs.append(selfdrive_state(t, i >= 100))
+      msgs.append(can_msg('can', t, [(0x100 + j, 0) for j in range(50)]))
+      msgs.append(can_msg('sendcan', t, [(0x100, 0)]))
+      if i % 10 == 0:
+        msgs.append(panda_state(t, True))
+    start = time.monotonic()
+    rule_failures(msgs, TOYOTA, 0)
+    self.assertLess(time.monotonic() - start, 2.)
 
 
 if __name__ == "__main__":
