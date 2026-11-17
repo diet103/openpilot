@@ -1,11 +1,13 @@
 import unittest
 
+from opendbc.can.dbc import DBC, SignalType
+from opendbc.car.car_helpers import interfaces
 from opendbc.car.tests.routes import routes
 from opendbc.car.toyota.values import CAR as TOYOTA, ToyotaSafetyFlags
 
 from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.test.up.oracle import load_libsafety
-from openpilot.selfdrive.test.up.replay import DT, needed_messages, thin, validate, window_frames
+from openpilot.selfdrive.test.up.replay import BUDGET, DT, _dbcs, needed_messages, thin, validate, window_frames
 from openpilot.selfdrive.test.up.scenario import Window, load_route, safety_pair
 
 SECONDS = 20
@@ -50,6 +52,17 @@ def route_frames(car):
   return CP, window_frames(msgs, Window(5., 5. + SECONDS))
 
 
+def plain_cp():
+  # the synthetic messages are in none of this car's DBCs
+  platform = str(TOYOTA.TOYOTA_COROLLA_TSS2)
+  return interfaces[platform].get_non_essential_params(platform)
+
+
+def needed_frames(CP, frames):
+  needed = needed_messages(CP, frames)
+  return [[f for f in frame if (f[2], f[0]) in needed] for frame in frames]
+
+
 def with_param(CP, param):
   CP = CP.copy()
   CP.safetyConfigs[-1].safetyParam = int(param)
@@ -58,19 +71,19 @@ def with_param(CP, param):
 
 class TestReplay(unittest.TestCase):
   def test_thin_keeps_constant_rate(self):
-    out = thin(synthetic(), {0: 60.})
+    out = thin(plain_cp(), synthetic(), {0: 60.})
     for addr, gap in ((0x100, 3), (0x200, 6)):
       pos = positions(out, addr)
       self.assertGreater(len(pos), 2)
       self.assertEqual({b - a for a, b in zip(pos, pos[1:], strict=False)}, {gap})
 
   def test_thin_within_budget(self):
-    frames = thin(synthetic(), {0: 60.})
+    frames = thin(plain_cp(), synthetic(), {0: 60.})
     self.assertLessEqual(sum(len(f) for f in frames) / (len(frames) * DT), 60.)
 
   def test_thin_no_change_when_fits(self):
     frames = synthetic()
-    self.assertEqual(thin(frames, {0: 1000.}), frames)
+    self.assertEqual(thin(plain_cp(), frames, {0: 1000.}), frames)
 
   def test_window_frames_drops_echoes(self):
     msgs = [can_msg(0., [(0x10, b'a', 0), (0x11, b'b', 128), (0x12, b'c', 192), (0x13, b'e', 4)]), can_msg(0.015, [(0x10, b'd', 1)])]
@@ -101,7 +114,7 @@ class TestReplay(unittest.TestCase):
 
   def test_validate_flags_starved_message(self):
     CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
-    problems = validate(CP, thin(frames, {0: 5.}))
+    problems = validate(CP, thin(CP, frames, {0: 5.}))
     self.assertTrue(any("panda" in p or "can't parse" in p for p in problems), problems)
 
   def test_validate_flags_starved_radar(self):
@@ -116,6 +129,32 @@ class TestReplay(unittest.TestCase):
     needed = needed_messages(CP, frames)
     frames = [[f for f in frame if (f[2], f[0]) in needed] for frame in frames]
     self.assertEqual(validate(CP, frames), [])
+
+  def test_thin_repacks_counters(self):
+    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    frames = needed_frames(CP, frames)
+    thinned = thin(CP, frames, BUDGET)
+    self.assertLess(sum(len(f) for f in thinned), sum(len(f) for f in frames))
+    dbcs = _dbcs(CP)
+    checked = 0
+    for (bus, addr), name in dbcs.items():
+      msg = DBC(name).addr_to_msg[addr]
+      kept = [dat for f in thinned for a, dat, b in f if (b, a) == (bus, addr)]
+      if len(kept) == sum(1 for f in frames for a, _, b in f if (b, a) == (bus, addr)):
+        continue
+      for sig in msg.sigs.values():
+        if sig.name == "COUNTER" or sig.type == SignalType.COUNTER:
+          counters = [sig.get_raw_value(d) for d in kept]
+          self.assertTrue(all((b - a) % (1 << sig.size) == 1 for a, b in zip(counters, counters[1:], strict=False)), (hex(addr), counters[:10]))
+          checked += 1
+        if sig.calc_checksum is not None:
+          self.assertTrue(all(sig.get_raw_value(d) == sig.calc_checksum(addr, sig, bytearray(d)) for d in kept), hex(addr))
+          checked += 1
+    self.assertGreater(checked, 0)
+
+  def test_validate_thinned_clean(self):
+    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    self.assertEqual(validate(CP, thin(CP, needed_frames(CP, frames), BUDGET)), [])
 
 
 if __name__ == "__main__":

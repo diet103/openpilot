@@ -156,7 +156,7 @@ def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, f
   _, _, msgs = load_route(route._replace(segment=s.segment))
   frames = window_frames(msgs, s.window)
   needed = needed_messages(s.CP, frames)
-  frames = thin([[f for f in frame if (f[2], f[0]) in needed] for frame in frames], budget)
+  frames = thin(s.CP, [[f for f in frame if (f[2], f[0]) in needed] for frame in frames], budget)
   seconds = len(frames) * DT
   rates = " ".join(f"{bus}:{sum(b == bus for f in frames for _, _, b in f) / seconds:.0f}" for bus in sorted(budget))
   problems = validate(s.CP, frames)

@@ -2,6 +2,8 @@ import math
 from collections import Counter
 from collections.abc import Iterable
 
+from opendbc.can.dbc import Msg, SignalType
+from opendbc.can.packer import CANPacker
 from opendbc.can.parser import MAX_BAD_COUNTER
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanData
@@ -18,6 +20,8 @@ DT = 0.01
 Frame = list[tuple[int, bytes, int]]
 # the first seconds are for the parsers to learn rates and the panda's RX checks to fill
 STARTUP = 2.
+# frames/s of a station's lanes for buses 0-2, measured on AGNOS 20.1
+BUDGET = {0: 230., 1: 130., 2: 60.}
 
 
 def _bytes(msg) -> bytes:
@@ -62,22 +66,59 @@ def needed_messages(CP: structs.CarParams, frames: list[Frame]) -> set[tuple[int
   parsers = [p for p in car.can_parsers.values() if p is not None]
   if radar.rcp is not None:
     parsers.append(radar.rcp)
-  needed = {(p.bus, addr) for p in parsers for addr in p.message_states}
+  return {(p.bus, addr) for p in parsers for addr in p.message_states} | _rx_checks(CP)
 
+
+def _rx_checks(CP: structs.CarParams) -> set[tuple[int, int]]:
   mode, param = safety_pair(CP)
   safety = load_libsafety()
   if safety.set_safety_hooks(mode, param) != 0:
     raise ValueError(f"libsafety has no safety mode {mode} param {param}")
   cfg = safety.safety_a.setup.current_safety_config
-  for i in range(cfg.rx_checks_len):
-    needed |= {(m.bus, m.addr) for m in cfg.rx_checks[i].msg if m.addr}
-  return needed
+  return {(m.bus, m.addr) for i in range(cfg.rx_checks_len) for m in cfg.rx_checks[i].msg if m.addr}
 
 
-def thin(frames: list[Frame], budget: dict[int, float]) -> list[Frame]:
+def _dbcs(CP: structs.CarParams) -> dict[tuple[int, int], str]:
+  # (bus, addr) -> name of the parser DBC that describes it
+  car, radar = _parsers(CP)
+  parsers = [p for p in car.can_parsers.values() if p is not None]
+  if radar.rcp is not None:
+    parsers.append(radar.rcp)
+  dbcs: dict[tuple[int, int], str] = {}
+  for p in parsers:
+    for addr in p.dbc.addr_to_msg:
+      dbcs.setdefault((p.bus, addr), p.dbc_name)
+  return dbcs
+
+
+def _is_counter(sig) -> bool:
+  return sig.type == SignalType.COUNTER or sig.name == "COUNTER"
+
+
+def _checked(msg: Msg) -> bool:
+  return any(_is_counter(sig) or sig.calc_checksum is not None for sig in msg.sigs.values())
+
+
+def _values(msg: Msg, dat: bytes) -> dict[str, float]:
+  values = {}
+  for sig in msg.sigs.values():
+    if _is_counter(sig) or sig.calc_checksum is not None:
+      continue
+    raw = sig.get_raw_value(dat)
+    if sig.is_signed:
+      raw -= ((raw >> (sig.size - 1)) & 0x1) * (1 << sig.size)
+    values[sig.name] = raw * sig.factor + sig.offset
+  return values
+
+
+def thin(CP: structs.CarParams, frames: list[Frame], budget: dict[int, float]) -> list[Frame]:
   seconds = len(frames) * DT
   load = Counter(bus for f in frames for _, _, bus in f)
   keep = {bus: max(1, math.ceil(load[bus] / seconds / rate)) for bus, rate in budget.items() if load[bus]}
+  dbcs = _dbcs(CP)
+  rx_checks = _rx_checks(CP)
+  # one packer per bus and DBC, so each bus continues its own counters
+  packers: dict[tuple[int, str], CANPacker] = {}
   seen: Counter[tuple[int, int]] = Counter()
   out: list[Frame] = []
   for frame in frames:
@@ -85,8 +126,20 @@ def thin(frames: list[Frame], budget: dict[int, float]) -> list[Frame]:
     for addr, dat, bus in frame:
       n = seen[(bus, addr)]
       seen[(bus, addr)] += 1
-      if n % keep.get(bus, 1) == 0:
-        kept.append((addr, dat, bus))
+      k = keep.get(bus, 1)
+      # the panda checks this message and no DBC can repack it, so it keeps every frame
+      if (bus, addr) in rx_checks and (bus, addr) not in dbcs:
+        k = 1
+      if n % k:
+        continue
+      dbc = dbcs.get((bus, addr))
+      if k > 1 and dbc is not None:
+        packer = packers.setdefault((bus, dbc), CANPacker(dbc))
+        msg = packer.dbc.addr_to_msg[addr]
+        # a kept frame skips k - 1 counter steps, repack it so the counter and checksum stay consecutive
+        if _checked(msg):
+          addr, dat, bus = packer.make_can_msg(addr, bus, _values(msg, dat))
+      kept.append((addr, dat, bus))
     out.append(kept)
   return out
 
