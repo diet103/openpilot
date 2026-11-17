@@ -1,3 +1,4 @@
+import math
 import os
 import pickle
 import subprocess
@@ -36,8 +37,6 @@ class Scenario:
   window: Window
   # the panda's engage edge, in segment seconds
   rise: float
-  # the last sample not allowed before the rise, the car's engage action comes after it
-  preroll_end: float
   CP: structs.CarParams
 
 
@@ -68,34 +67,40 @@ def can_span(msgs: Iterable) -> float:
   return (max(times) - min(times)) / 1e9 if times else 0.
 
 
-def pick_window(samples: list[tuple[float, bool]], can_end: float) -> tuple[Window, float, float] | None:
-  # the window, its engage edge and the last not allowed sample before the edge
+def pick_window(samples: list[tuple[float, bool]], can_end: float, lead_in: bool = True) -> tuple[Window, float] | None:
+  # the window and its engage edge, the window starts LEAD before the edge with the panda not allowed throughout,
+  # so the UP's loop of it is a lead-in, the edge, the engaged stretch and the wrap
+  # lead_in=False skips the lead-in check, to tell a missing lead-in from a missing stretch
   best = None
   best_len = 0.
-  # (first not allowed sample before the rise, rise, last not allowed sample before the rise) of the current stretch
-  stretch = None
-  down = None
+  rise = None
+  # the last allowed sample before the current stretch's rise, and before now
+  allowed_before_rise = -math.inf
+  last_allowed = -math.inf
+  seen_down = False
   # a stretch starts where the panda goes from not allowed to allowed, the rack's panda starts disengaged
   # and has to engage from the replay, so one engaged since the first sample has no usable start
   # a stretch ends at the first sample that is not engaged, or at the last sample
   for i, (t, allowed) in enumerate(samples):
-    if allowed and stretch is None and down is not None:
-      stretch = (down, t, samples[i - 1][0])
-    if not allowed and (i == 0 or samples[i - 1][1]):
-      down = t
+    if allowed and rise is None and seen_down:
+      rise, allowed_before_rise = t, last_allowed
+    if allowed:
+      last_allowed = t
+    else:
+      seen_down = True
     last = i == len(samples) - 1
-    if stretch is not None and (not allowed or last):
-      before, rise, preroll_end = stretch
+    if rise is not None and (not allowed or last):
       length = (can_end if allowed else t) - rise
-      # the window starts where the panda is not allowed, after any earlier stretch
-      start = max(0., before, min(rise - LEAD, can_end - LENGTH))
-      if length >= MIN_ENGAGED and length > best_len and start + LENGTH <= can_end:
-        best, best_len = (start, rise, preroll_end), length
-      stretch = None
+      start = rise - LEAD
+      fits = length >= MIN_ENGAGED and start + LENGTH <= can_end
+      led_in = start >= 0. and allowed_before_rise < start
+      if fits and (led_in or not lead_in) and length > best_len:
+        best, best_len = (start, rise), length
+      rise = None
   if best is None:
     return None
-  start, rise, preroll_end = best
-  return Window(start, start + LENGTH), rise, preroll_end
+  start, rise = best
+  return Window(start, start + LENGTH), rise
 
 
 def safety_pair(CP: structs.CarParams) -> tuple[int, int]:
@@ -141,6 +146,7 @@ def build_candidates(routes, load: Callable[[CarTestRoute], tuple[int, structs.C
   scenarios: dict[tuple[int, int], list[Scenario]] = {}
   seen_pairs: set[tuple[int, int]] = set()
   engaged_from_start: set[tuple[int, int]] = set()
+  no_lead_in: set[tuple[int, int]] = set()
   gaps = []
   for route in routes:
     who = f"{route.car_model} {route.route}"
@@ -163,14 +169,18 @@ def build_candidates(routes, load: Callable[[CarTestRoute], tuple[int, structs.C
       continue
     picked = pick_window(samples, span)
     if picked is not None:
-      window, rise, preroll_end = picked
-      scenario = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, rise, preroll_end, CP)
+      window, rise = picked
+      scenario = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, rise, CP)
       scenarios.setdefault(mode_param, []).append(scenario)
+    elif pick_window(samples, span, lead_in=False) is not None:
+      no_lead_in.add(mode_param)
     elif samples[0][1]:
       engaged_from_start.add(mode_param)
 
   for mode, param in sorted(seen_pairs - scenarios.keys()):
-    if (mode, param) in engaged_from_start:
+    if (mode, param) in no_lead_in:
+      gaps.append(f"mode {mode} param {param}: no {LEAD:g} s disengaged lead-in before the engage edge")
+    elif (mode, param) in engaged_from_start:
       gaps.append(f"mode {mode} param {param}: no engage edge in segment")
     else:
       gaps.append(f"mode {mode} param {param}: no engaged stretch of {MIN_ENGAGED:g} s in any route")

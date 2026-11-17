@@ -6,9 +6,7 @@ from pathlib import Path
 from opendbc.car.structs import CarParams
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.drive import Drive, RigProblem, onroad_missing, onroad_timeout, split_preroll
-from openpilot.selfdrive.test.up.replay import DT
-from openpilot.selfdrive.test.up.scenario import Window, pick_window
+from openpilot.selfdrive.test.up.drive import Drive, RigProblem, onroad_missing, onroad_timeout
 
 
 def alive(pid: int) -> bool:
@@ -21,23 +19,6 @@ def alive(pid: int) -> bool:
 
 
 class TestDrive(unittest.TestCase):
-  def test_split_preroll(self):
-    window = Window(10., 13.)
-    frames = [[(0x100, bytes([i % 256]), 0)] for i in range(round((window.end - window.start) / DT))]
-    # the last not allowed sample 1.5 s into the window
-    preroll, full = split_preroll(frames, window, 11.5)
-    self.assertEqual(preroll, frames[:150])
-    self.assertEqual(full, frames)
-
-  def test_preroll_ends_before_edge(self):
-    # 10 Hz samples, not allowed at 9.9 s, allowed from 10.0 s
-    window, _, preroll_end = pick_window([(i / 10, i >= 100) for i in range(400)], 40.)
-    frames = [[(0x100, bytes([i % 256]), 0)] for i in range(round((window.end - window.start) / DT))]
-    preroll, _ = split_preroll(frames, window, preroll_end)
-    # only frames before 9.9 s, the window starts at 5 s
-    self.assertEqual(len(preroll), 490)
-    self.assertEqual(preroll, frames[:490])
-
   def test_onroad_timeout(self):
     died = onroad_timeout(-11, False, {1}, ["not started"])
     self.assertNotIsInstance(died, RigProblem)
@@ -62,11 +43,6 @@ class TestDrive(unittest.TestCase):
     while alive(orphan) and time.monotonic() < end:
       time.sleep(0.01)
     self.assertFalse(alive(orphan))
-
-  def test_split_preroll_no_frames_before_edge(self):
-    frames = [[(0x100, bytes(1), 0)] for _ in range(300)]
-    with self.assertRaises(ValueError):
-      split_preroll(frames, Window(10., 13.), 10.)
 
   def test_onroad_missing(self):
     sm = {

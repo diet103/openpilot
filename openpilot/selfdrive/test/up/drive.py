@@ -9,11 +9,13 @@ from openpilot.common.basedir import BASEDIR
 from openpilot.selfdrive.test.helpers import set_params_enabled
 from openpilot.selfdrive.test.up.replay import DT, Frame
 from openpilot.selfdrive.test.up.rules import NO_CAR_MODES
-from openpilot.selfdrive.test.up.scenario import LENGTH, Scenario, Window
+from openpilot.selfdrive.test.up.scenario import LENGTH, Scenario
 
 ONROAD_LIMIT = 120.
 # after onroad, a car that doesn't get engageable fails, the rig is fine
 ENGAGEABLE_LIMIT = 30.
+# one full loop of the window, wherever in the loop the recording starts
+RECORD_TIME = 2 * LENGTH
 RECORD = ('can', 'sendcan', 'pandaStates', 'selfdriveState', 'carState', 'onroadEvents')
 # the panda marks its own tx echoes with src + 128
 ECHO = 128
@@ -21,15 +23,6 @@ ECHO = 128
 
 class RigProblem(Exception):
   pass
-
-
-def split_preroll(frames: list[Frame], window: Window, preroll_end: float) -> tuple[list[Frame], list[Frame]]:
-  # the frames before the last not allowed sample loop until openpilot is engageable, then the whole window plays once
-  # rounded like window_frames counts frames, a float floor drops a frame at an exact boundary
-  n = round((preroll_end - window.start) / DT)
-  if n <= 0:
-    raise ValueError(f"no frames before the preroll end at {preroll_end:.2f} s, window starts at {window.start:.2f} s")
-  return frames[:n], frames
 
 
 def onroad_missing(sm) -> list[str]:
@@ -75,7 +68,7 @@ class Drive:
   def __init__(self, up):
     self.up = up
     self._manager: subprocess.Popen | None = None
-    # how long the last up.can_replay(window) took, the upload delays the window's start
+    # how long the last up.can_replay call took, the UP gets every frame in it
     self.replay_call_s = 0.
 
   def _up(self, call: str, *args):
@@ -146,18 +139,13 @@ class Drive:
       sm.update(10)
     self._check_manager()
 
-  def _record(self, window: list[Frame]) -> list:
-    # subscribed before the call, the upload can't cut the window's start
+  def _record(self) -> list:
     socks = [messaging.sub_sock(s, conflate=False) for s in RECORD]
     for sock in socks:
       messaging.drain_sock_raw(sock)
-    called = time.monotonic()
-    self._up('can_replay', window)
-    returned = time.monotonic()
-    self.replay_call_s = returned - called
-    print(f"up.can_replay(window) took {self.replay_call_s:.2f} s")
     msgs = []
-    while time.monotonic() < returned + LENGTH:
+    end = time.monotonic() + RECORD_TIME
+    while time.monotonic() < end:
       self._check_manager()
       for sock in socks:
         msgs += messaging.drain_sock(sock)
@@ -168,18 +156,21 @@ class Drive:
     return msgs
 
   def run(self, scenario: Scenario, frames: list[Frame]) -> list:
-    preroll, window = split_preroll(frames, scenario.window, scenario.preroll_end)
-    buses = {bus for frame in preroll for _, _, bus in frame}
+    # the UP loops the window from its call until reset, each loop a lead-in, the engage edge, the engaged stretch and the wrap
+    buses = {bus for frame in frames for _, _, bus in frame}
     sm = messaging.SubMaster(['deviceState', 'carState', 'managerState', 'pandaStates', 'selfdriveState', 'onroadEvents'])
     can_sock = messaging.sub_sock('can', conflate=False)
     self._start_manager(scenario)
     try:
       self._up('reset')
       self._up('set_ignition', True)
-      self._up('can_replay', preroll)
+      called = time.monotonic()
+      self._up('can_replay', frames)
+      self.replay_call_s = time.monotonic() - called
+      print(f"up.can_replay took {self.replay_call_s:.2f} s")
       self._wait_onroad(sm, can_sock, buses)
       self._wait_engageable(sm)
-      return self._record(window)
+      return self._record()
     finally:
       try:
         self._up('reset')

@@ -57,37 +57,41 @@ def fake_load(by_route, pairs=None):
 
 class TestScenario(unittest.TestCase):
   def test_window_longest_stretch(self):
-    self.assertEqual(pick_window(samples((2, 9), (20, 60)), 70.), (Window(15., 45.), 20., 19.))
+    self.assertEqual(pick_window(samples((2, 9), (20, 60)), 70.), (Window(15., 45.), 20.))
 
-  def test_preroll_end_is_last_disallowed_sample(self):
-    # 10 Hz samples, not allowed until 9.9 s, allowed from 10.0 s
-    fine = [(i / 10, i >= 100) for i in range(400)]
-    self.assertEqual(pick_window(fine, 40.), (Window(5., 35.), 10., 9.9))
+  def test_window_exact_lead(self):
+    self.assertEqual(pick_window(samples((20, 60)), 70.), (Window(15., 45.), 20.))
 
-  def test_window_clamped_at_start(self):
-    self.assertEqual(pick_window(samples((2, 40)), 70.), (Window(0., 30.), 2., 1.))
+  def test_lead_in_too_short(self):
+    self.assertIsNone(pick_window(samples((3, 40)), 70.))
     self.assertIsNone(pick_window(samples((0, 40)), 70.))
+    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([False] * 3 + [True] * 37)}))
+    self.assertEqual(scenarios, [])
+    self.assertEqual(gaps, ["mode 1 param 2: no 5 s disengaged lead-in before the engage edge"])
+
+  def test_lead_in_engaged(self):
+    # allowed at 17 s, inside the window that would start at 15 s
+    self.assertIsNone(pick_window(samples((2, 18), (20, 60)), 70.))
+    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([2 <= i < 18 or i >= 20 for i in range(70)])}))
+    self.assertEqual(scenarios, [])
+    self.assertEqual(gaps, ["mode 1 param 2: no 5 s disengaged lead-in before the engage edge"])
 
   def test_window_needs_engage_edge(self):
     self.assertIsNone(pick_window(samples((0, 50)), 70.))
-    self.assertEqual(pick_window(samples((0, 20), (30, 50)), 70.), (Window(25., 55.), 30., 29.))
+    self.assertEqual(pick_window(samples((0, 20), (30, 50)), 70.), (Window(25., 55.), 30.))
     scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([True] * 40)}))
     self.assertEqual(scenarios, [])
     self.assertEqual(gaps, ["mode 1 param 2: no engage edge in segment"])
 
-  def test_window_starts_disengaged(self):
-    # engaged until 41.7 s, the window can't reach back to 30 s while the panda is still allowed
-    self.assertIsNone(pick_window(samples((0, 42), (44, 70)), 70.))
-    self.assertEqual(pick_window(samples((0, 30), (34, 60)), 70.), (Window(30., 60.), 34., 33.))
-
   def test_window_too_short(self):
-    self.assertIsNone(pick_window(samples((3, 12)), 70.))
+    self.assertIsNone(pick_window(samples((8, 17)), 70.))
 
   def test_window_never_engaged(self):
     self.assertIsNone(pick_window(samples(), 70.))
 
   def test_window_fits_segment(self):
-    self.assertEqual(pick_window(samples((50, 60), end=60), 60.), (Window(30., 60.), 50., 49.))
+    self.assertEqual(pick_window(samples((30, 60), end=60), 60.), (Window(25., 55.), 30.))
+    self.assertIsNone(pick_window(samples((50, 60), end=60), 60.))
 
   def test_one_scenario_per_pair(self):
     engaged = panda_states([False] * 10 + [True] * 30)
@@ -121,7 +125,7 @@ class TestScenario(unittest.TestCase):
   def test_times_from_first_can(self):
     early = panda_states([False], start=100.)[2:]
     engaged = panda_states([20 <= i < 60 for i in range(70)], start=200., can_at=200.)
-    self.assertEqual(pick_window(engaged_samples(early + engaged), can_span(engaged)), (Window(15., 45.), 20., 19.))
+    self.assertEqual(pick_window(engaged_samples(early + engaged), can_span(engaged)), (Window(15., 45.), 20.))
 
   def test_gap_when_load_fails(self):
     scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: OSError("nope")}))
@@ -136,7 +140,7 @@ class TestScenario(unittest.TestCase):
       path.write_bytes(zstd.compress(b"".join(m.to_bytes() for m in msgs)))
       with mock.patch("openpilot.selfdrive.test.up.scenario.get_cached_segment", return_value=path):
         segment, CP, loaded = load_route(CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A", 0), params=lambda r, p: fake_car_params(1, 2))
-        logged = load_log(Scenario("aaaa|2024-01-01--00-00-00", 0, "CAR_A", 1, 2, Window(0., 30.), 5., 4., CP))
+        logged = load_log(Scenario("aaaa|2024-01-01--00-00-00", 0, "CAR_A", 1, 2, Window(0., 30.), 5., CP))
     self.assertEqual((segment, safety_pair(CP)), (0, (1, 2)))
     self.assertEqual([m.logMonoTime for m in loaded], [int(1e9), int(2e9)])
     self.assertEqual([m.logMonoTime for m in logged], [int(1e9), int(2e9)])
@@ -158,7 +162,6 @@ class TestScenario(unittest.TestCase):
     scenarios, _ = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: engaged}))
     self.assertEqual(scenarios[0].window, Window(5., 35.))
     self.assertEqual(scenarios[0].rise, 10.)
-    self.assertEqual(scenarios[0].preroll_end, 9.)
 
   def test_candidates_in_routes_order(self):
     engaged = panda_states([False] * 10 + [True] * 30)
@@ -179,7 +182,7 @@ class TestCachedScenarios(unittest.TestCase):
 
   def build(self, routes, budget):
     self.calls += 1
-    return [Scenario("a|2024-01-01--00-00-00", 0, "CAR", 1, 2, Window(0., 30.), 5., 4., structs.CarParams())], ["gap"]
+    return [Scenario("a|2024-01-01--00-00-00", 0, "CAR", 1, 2, Window(0., 30.), 5., structs.CarParams())], ["gap"]
 
   def test_cache_hit(self):
     first = cached_scenarios(self.dir, BUDGET, self.build, [], tree=lambda: "t1")
