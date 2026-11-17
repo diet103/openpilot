@@ -164,6 +164,9 @@ def validate(CP: structs.CarParams, frames: list[Frame]) -> list[str]:
   problems += sorted({f"panda rejects 0x{addr:x} bus {bus}" for _, addr, bus in run.rx_rejected})
   if any(t > STARTUP for t in run.rx_checks_invalid):
     problems.append("panda RX checks invalid")
+  # the route's own cruise and buttons engage the rack's panda, without a heartbeat it drops controls again after a few ticks
+  if not any(allowed for _, allowed in run.controls_allowed):
+    problems.append("panda never engages")
 
   car, radar = _parsers(CP)
   can_valid = True

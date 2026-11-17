@@ -3,6 +3,7 @@ import unittest
 from collections import Counter
 
 from opendbc.can.dbc import DBC, SignalType
+from opendbc.can.packer import CANPacker
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.tests.routes import routes
 from opendbc.car.hyundai.values import CAR as HYUNDAI
@@ -140,6 +141,23 @@ class TestReplay(unittest.TestCase):
     gone = [i < 110 or 1000 <= i < 1200 for i in range(len(frames))]
     frames = [[m for m in frame if not (drop and (m[2], m[0]) == (0, 0x260))] for frame, drop in zip(frames, gone, strict=True)]
     self.assertIn("panda RX checks invalid", validate(CP, frames))
+
+  def test_validate_flags_no_engage(self):
+    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    self.assertNotIn("panda never engages", validate(CP, frames))
+    # the same frames with the cruise state never active
+    dbc = "toyota_nodsu_pt_generated"
+    msg = DBC(dbc).addr_to_msg[0x1d2]
+    packer = CANPacker(dbc)
+    off = []
+    for frame in frames:
+      kept = []
+      for addr, dat, bus in frame:
+        if (addr, bus) == (0x1d2, 0):
+          addr, dat, bus = packer.make_can_msg(addr, bus, _values(msg, dat) | {"CRUISE_ACTIVE": 0})
+        kept.append((addr, dat, bus))
+      off.append(kept)
+    self.assertEqual(validate(CP, off), ["panda never engages"])
 
   def test_validate_flags_starved_radar(self):
     CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
