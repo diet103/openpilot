@@ -57,7 +57,15 @@ class TestScenario(unittest.TestCase):
     self.assertEqual(pick_window(samples((2, 9), (20, 60)), 70.), Window(15., 45.))
 
   def test_window_clamped_at_start(self):
-    self.assertEqual(pick_window(samples((0, 40)), 70.), Window(0., 30.))
+    self.assertEqual(pick_window(samples((2, 40)), 70.), Window(0., 30.))
+    self.assertIsNone(pick_window(samples((0, 40)), 70.))
+
+  def test_window_needs_engage_edge(self):
+    self.assertIsNone(pick_window(samples((0, 50)), 70.))
+    self.assertEqual(pick_window(samples((0, 50), (55, 70)), 70.), Window(40., 70.))
+    scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([True] * 40)}))
+    self.assertEqual(scenarios, [])
+    self.assertEqual(gaps, ["mode 1 param 2: no engage edge in segment"])
 
   def test_window_too_short(self):
     self.assertIsNone(pick_window(samples((3, 12)), 70.))

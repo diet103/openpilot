@@ -68,9 +68,11 @@ def pick_window(samples: list[tuple[float, bool]], can_end: float) -> Window | N
   best = None
   best_len = 0.
   rise = None
+  # a stretch starts where the panda goes from not allowed to allowed, the rack's panda starts disengaged
+  # and has to engage from the replay, so one engaged since the first sample has no usable start
   # a stretch ends at the first sample that is not engaged, or at the last sample
   for i, (t, allowed) in enumerate(samples):
-    if allowed and rise is None:
+    if allowed and rise is None and i > 0 and not samples[i - 1][1]:
       rise = t
     last = i == len(samples) - 1
     if rise is not None and (not allowed or last):
@@ -116,6 +118,7 @@ def load_route(route: CarTestRoute, params: Callable[[CarTestRoute, Path], struc
 def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.CarParams, list]] = load_route) -> tuple[list[Scenario], list[str]]:
   scenarios: dict[tuple[int, int], Scenario] = {}
   seen_pairs: set[tuple[int, int]] = set()
+  engaged_from_start: set[tuple[int, int]] = set()
   gaps = []
   for route in routes:
     who = f"{route.car_model} {route.route}"
@@ -141,9 +144,14 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.Ca
     window = pick_window(samples, span)
     if window is not None:
       scenarios[mode_param] = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, CP)
+    elif samples[0][1]:
+      engaged_from_start.add(mode_param)
 
   for mode, param in sorted(seen_pairs - scenarios.keys()):
-    gaps.append(f"mode {mode} param {param}: no engaged stretch of {MIN_ENGAGED:g} s in any route")
+    if (mode, param) in engaged_from_start:
+      gaps.append(f"mode {mode} param {param}: no engage edge in segment")
+    else:
+      gaps.append(f"mode {mode} param {param}: no engaged stretch of {MIN_ENGAGED:g} s in any route")
   return list(scenarios.values()), gaps
 
 
