@@ -23,6 +23,10 @@ for p in msgq_repo/msgq opendbc_repo/opendbc rednose_repo/rednose teleoprtc_repo
 tools/op.sh build
 """
 
+[steps.up-drives]
+name = "UP drives"
+run = "./openpilot/selfdrive/test/up/test_up_drives.py"
+
 [steps.flash-chestnut]
 name = "Flash Chestnut"
 run = "sudo python3 openpilot/system/hardware/chestnut/flash.py"
@@ -44,6 +48,18 @@ run = "tools/release/check-dirty.sh"
 name = "Onroad tests"
 run = "openpilot/tools/replay/can_replay.py --up && ./openpilot/selfdrive/test/test_onroad.py TestOnroad"
 timeout-minutes = 1.5
+
+# every car's engaged route window end to end, the UP plays the car. the scenario list and the route logs live in the cache
+[jobs.up_drives]
+runs-on = "up-can"
+timeout-minutes = 60
+env = { COMMA_CACHE = "/data/scons_cache/up_routes" }
+
+[[jobs.up_drives.steps]]
+uses = "build"
+
+[[jobs.up_drives.steps]]
+uses = "up-drives"
 
 [jobs.hardware]
 runs-on = "up-mici"
