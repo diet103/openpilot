@@ -155,6 +155,9 @@ class TestScenario(unittest.TestCase):
     self.assertEqual(gaps, [])
 
 
+BUDGET = {0: 230., 1: 130., 2: 60.}
+
+
 class TestCachedScenarios(unittest.TestCase):
   def setUp(self):
     self.calls = 0
@@ -162,32 +165,47 @@ class TestCachedScenarios(unittest.TestCase):
     self.addCleanup(self.tmp.cleanup)
     self.dir = Path(self.tmp.name) / "up_scenarios"
 
-  def build(self, routes):
+  def build(self, routes, budget):
     self.calls += 1
     return [Scenario("a|2024-01-01--00-00-00", 0, "CAR", 1, 2, Window(0., 30.), structs.CarParams())], ["gap"]
 
   def test_cache_hit(self):
-    first = cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
-    second = cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
+    first = cached_scenarios(self.dir, BUDGET, self.build, [], tree=lambda: "t1")
+    second = cached_scenarios(self.dir, BUDGET, self.build, [], tree=lambda: "t1")
     self.assertEqual(self.calls, 1)
     self.assertEqual(second[1], ["gap"])
     # the CP comes back as a reader, compare by dict
     self.assertEqual([(s.route, s.window, s.CP.to_dict()) for s in first[0]], [(s.route, s.window, s.CP.to_dict()) for s in second[0]])
 
   def test_cache_key_changes(self):
-    cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
-    cached_scenarios(self.dir, [], self.build, tree=lambda: "t2")
-    cached_scenarios(self.dir, [], self.build, budget={0: 230., 1: 130., 2: 60.}, tree=lambda: "t1")
+    cached_scenarios(self.dir, BUDGET, self.build, [], tree=lambda: "t1")
+    cached_scenarios(self.dir, BUDGET, self.build, [], tree=lambda: "t2")
+    cached_scenarios(self.dir, {0: 1., 1: 2.}, self.build, [], tree=lambda: "t1")
     self.assertEqual(self.calls, 3)
 
+  def test_cache_key_bus_ids(self):
+    cached_scenarios(self.dir, {0: 230., 1: 130.}, self.build, [], tree=lambda: "t1")
+    cached_scenarios(self.dir, {1: 230., 2: 130.}, self.build, [], tree=lambda: "t1")
+    self.assertEqual(self.calls, 2)
+
+  def test_cache_key_harness_change(self):
+    cached_scenarios(self.dir, BUDGET, self.build, [], tree=lambda: "opendbc-harness1")
+    cached_scenarios(self.dir, BUDGET, self.build, [], tree=lambda: "opendbc-harness2")
+    self.assertEqual(self.calls, 2)
+
+  def test_build_gets_budget(self):
+    seen = []
+    cached_scenarios(self.dir, BUDGET, lambda routes, budget: seen.append(budget) or ([], []), [], tree=lambda: "t1")
+    self.assertEqual(seen, [BUDGET])
+
   def test_cache_corrupt(self):
-    cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
+    cached_scenarios(self.dir, BUDGET, self.build, [], tree=lambda: "t1")
     (path,) = self.dir.glob("*.pkl")
     path.write_bytes(b"garbage")
-    scenarios, gaps = cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
+    scenarios, gaps = cached_scenarios(self.dir, BUDGET, self.build, [], tree=lambda: "t1")
     self.assertEqual(self.calls, 2)
     self.assertEqual(len(scenarios), 1)
-    cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
+    cached_scenarios(self.dir, BUDGET, self.build, [], tree=lambda: "t1")
     self.assertEqual(self.calls, 2)
 
 

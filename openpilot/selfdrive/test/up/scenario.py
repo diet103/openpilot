@@ -174,14 +174,18 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.Ca
   return [c[0] for c in candidates.values()], gaps
 
 
-def opendbc_tree() -> str:
-  return subprocess.check_output(["git", "rev-parse", "HEAD:opendbc_repo"], cwd=BASEDIR, text=True).strip()
+def source_tree() -> str:
+  # opendbc and this harness, so a change to either rebuilds the list
+  ids = []
+  for path in ("opendbc_repo", "openpilot/selfdrive/test/up"):
+    ids.append(subprocess.check_output(["git", "rev-parse", f"HEAD:{path}"], cwd=BASEDIR, text=True).strip())
+  return "-".join(ids)
 
 
-def cached_scenarios(cache_dir: Path, routes=test_routes, build: Callable = build_scenarios, budget: dict[int, float] | None = None,
-                     tree: Callable[[], str] = opendbc_tree) -> tuple[list[Scenario], list[str]]:
-  # the list only changes with opendbc or the lane budget it was picked for
-  lanes = "-".join(f"{rate:g}" for rate in (budget or {}).values())
+def cached_scenarios(cache_dir: Path, budget: dict[int, float], build: Callable[[Iterable[CarTestRoute], dict[int, float]], tuple[list[Scenario], list[str]]],
+                     routes=test_routes, tree: Callable[[], str] = source_tree) -> tuple[list[Scenario], list[str]]:
+  # the list changes with the sources and the lane budget it was picked for
+  lanes = "-".join(f"{bus}:{rate:g}" for bus, rate in sorted(budget.items()))
   path = cache_dir / f"{tree()}-{lanes}.pkl"
   if path.exists():
     try:
@@ -190,7 +194,7 @@ def cached_scenarios(cache_dir: Path, routes=test_routes, build: Callable = buil
     except Exception:
       pass
 
-  data = pickle.dumps(build(routes))
+  data = pickle.dumps(build(routes, budget))
   cache_dir.mkdir(parents=True, exist_ok=True)
   # write whole or not at all, runs share the cache dir
   fd, tmp = tempfile.mkstemp(dir=cache_dir)
