@@ -86,6 +86,35 @@ def _panda_states(rec: Recording):
       yield i, msg.pandaStates[0]
 
 
+BLOCKING_FLAGS = ('noEntry', 'softDisable', 'immediateDisable', 'userDisable')
+
+
+def _openpilot_reasons(rec: Recording, end: float) -> str:
+  # latest selfdriveState and onroadEvents at or before end
+  state = None
+  events = None
+  for i, msg in enumerate(rec.msgs):
+    if rec.t(i) > end:
+      break
+    if msg.which() == 'selfdriveState':
+      state = msg.selfdriveState
+    elif msg.which() == 'onroadEvents':
+      events = msg.onroadEvents
+  parts = []
+  if state is not None:
+    parts.append(f"state {state.state}, engageable {state.engageable}")
+  if events is None:
+    parts.append("no onroadEvents recorded")
+  else:
+    names = []
+    for event in events:
+      flags = [flag for flag in BLOCKING_FLAGS if getattr(event, flag)]
+      if flags:
+        names.append(f"{event.name} ({', '.join(flags)})")
+    parts.append(f"events [{', '.join(names)}]")
+  return ", ".join(parts)
+
+
 def _not_engaged(rec: Recording) -> list[tuple[float, str]]:
   failures = []
   prev_allowed = None
@@ -98,7 +127,8 @@ def _not_engaged(rec: Recording) -> list[tuple[float, str]]:
         if idx > i and rec.t(idx) <= edge + ENGAGE_LIMIT and rec.sd_enabled[pos]:
           engaged = True
       if not engaged:
-        failures.append((edge, f"t={edge:.2f} not engaged, openpilot not enabled within {ENGAGE_LIMIT:.0f}s of controls_allowed"))
+        reasons = _openpilot_reasons(rec, edge + ENGAGE_LIMIT)
+        failures.append((edge, f"t={edge:.2f} not engaged within {ENGAGE_LIMIT:.0f}s of controls_allowed: {reasons}"))
     prev_allowed = allowed
   return failures
 

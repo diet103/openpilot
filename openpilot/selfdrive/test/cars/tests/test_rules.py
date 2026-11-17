@@ -23,6 +23,15 @@ def selfdrive_state(t, enabled):
   return msg
 
 
+def onroad_events(t, name, **flags):
+  msg = new_message('onroadEvents', 1)
+  msg.logMonoTime = int(t * 1e9)
+  msg.onroadEvents[0].name = name
+  for flag, value in flags.items():
+    setattr(msg.onroadEvents[0], flag, value)
+  return msg
+
+
 def can_msg(which, t, frames):
   msg = new_message(which, len(frames))
   msg.logMonoTime = int(t * 1e9)
@@ -70,6 +79,18 @@ class TestRules(unittest.TestCase):
       msgs.append(can_msg('sendcan', 5.01 + i, [(0x100, 0)]))
       msgs.append(selfdrive_state(5.02 + i, True))
     self.assertTrue(any("controls_allowed false while engaged" in f for f in failures(msgs)))
+
+  def test_not_engaged_names_reasons(self):
+    msgs = [panda_state(0., False), selfdrive_state(0., False)]
+    msgs += [onroad_events(0.5, 'calibrationIncomplete', noEntry=True), panda_state(1., True), selfdrive_state(3.5, False)]
+    result = failures(msgs)
+    self.assertEqual(len(result), 1)
+    self.assertIn("calibrationIncomplete (noEntry)", result[0])
+    self.assertIn("state disabled, engageable False", result[0])
+
+  def test_not_engaged_no_events(self):
+    msgs = [panda_state(0., False), selfdrive_state(0., False), panda_state(1., True), selfdrive_state(3.5, False)]
+    self.assertIn("no onroadEvents recorded", failures(msgs)[0])
 
   def test_blocked_while_engaged(self):
     msgs = clean_drive()
