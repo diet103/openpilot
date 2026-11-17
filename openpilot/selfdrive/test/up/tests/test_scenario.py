@@ -1,9 +1,14 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
+
+import zstandard as zstd
 
 from opendbc.car.tests.routes import CarTestRoute
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, can_span, engaged_samples, pick_window
+from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, can_span, engaged_samples, load_route, pick_window
 
 ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")
 ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")
@@ -91,6 +96,17 @@ class TestScenario(unittest.TestCase):
     scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: OSError("nope")}))
     self.assertEqual(scenarios, [])
     self.assertIn("can't load", gaps[0])
+
+  def test_load_signed_url_name(self):
+    msgs = [can_start(2.), can_start(1.)]
+    with tempfile.TemporaryDirectory() as tmp:
+      # the cache names a comma API log after the last part of its signed url
+      path = Path(tmp) / "0123.zst&sig=abc%3D"
+      path.write_bytes(zstd.compress(b"".join(m.to_bytes() for m in msgs)))
+      with mock.patch("openpilot.selfdrive.test.up.scenario.get_cached_segment", return_value=path):
+        segment, pair, loaded = load_route(CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A", 0), pair=lambda r, p: (1, 2))
+    self.assertEqual((segment, pair), (0, (1, 2)))
+    self.assertEqual([m.logMonoTime for m in loaded], [int(1e9), int(2e9)])
 
 
 if __name__ == "__main__":

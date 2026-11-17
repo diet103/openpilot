@@ -91,7 +91,8 @@ def load_route(route: CarTestRoute, pair: Callable[[CarTestRoute, Path], tuple[i
   for segment in segments:
     try:
       path = get_cached_segment(route.route, segment)
-      msgs = list(LogReader(str(path), sort_by_time=True))
+      # a log from the comma API is cached under a name cut from its signed url, so read it by content
+      msgs = sorted(LogReader.from_bytes(path.read_bytes()), key=lambda m: m.logMonoTime)
     except (OSError, AssertionError) as e:
       errors.append(f"segment {segment}: {e!r}")
       continue
