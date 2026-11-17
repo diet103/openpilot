@@ -163,16 +163,30 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.Ca
   return list(scenarios.values()), gaps
 
 
-def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, float]) -> tuple[str | None, str | None, Counter[str]]:
-  # (scenario line, or a coverage gap if only thinning breaks the replay, stage times)
+@dataclass
+class Report:
+  # a scenario line, or the coverage gap it became
+  line: str | None
+  gap: str | None
+  times: Counter[str]
+
+
+def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, float],
+                    load: Callable[[CarTestRoute], tuple[int, structs.CarParams, list]] = load_route) -> Report:
+  times: Counter[str] = Counter()
+  try:
+    return _scenario_report(scenario, route, budget, load, times)
+  except Exception as e:
+    return Report(None, f"{scenario.car_model} {scenario.route}: {e!r}", times)
+
+
+def _scenario_report(s: Scenario, route: CarTestRoute, budget: dict[int, float], load: Callable, times: Counter[str]) -> Report:
   # replay and oracle import this module
   from openpilot.selfdrive.test.up.oracle import command_mismatches, run_safety, state_mismatches
   from openpilot.selfdrive.test.up.replay import DT, needed_messages, over_budget, thin, validate, window_frames
 
-  s = scenario
-  times: Counter[str] = Counter()
   t = time.monotonic()
-  _, _, msgs = load_route(route._replace(segment=s.segment))
+  _, _, msgs = load(route._replace(segment=s.segment))
   times["load"] += time.monotonic() - t
 
   t = time.monotonic()
@@ -190,7 +204,7 @@ def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, f
   lane_problems = over_budget(frames, budget) or (problems if problems and not validate(s.CP, needed_frames) else [])
   times["validate"] += time.monotonic() - t
   if lane_problems:
-    return None, f"mode {s.mode} param {s.param}: lane budget: {', '.join(lane_problems)}", times
+    return Report(None, f"mode {s.mode} param {s.param}: lane budget: {', '.join(lane_problems)}", times)
 
   t = time.monotonic()
   # the oracle sees the same window of the recording, in the same time base
@@ -202,7 +216,21 @@ def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, f
 
   where = f"{s.mode} {s.param} {s.car_model} {s.route} {s.window.start:.0f}-{s.window.end:.0f}s"
   checks = f"validate {', '.join(problems) or 'ok'} commands {len(commands)} state {len(state)}"
-  return f"{where} frames/s {rates} {checks}", None, times
+  return Report(f"{where} frames/s {rates} {checks}", None, times)
+
+
+def run_scenarios(scenarios: list[Scenario], routes: list[CarTestRoute], budget: dict[int, float],
+                  map_fn: Callable = map, report: Callable[..., Report] = scenario_report) -> tuple[list[str], list[str], Counter[str]]:
+  by_name = {(r.route, str(r.car_model)): r for r in routes}
+  lines, gaps = [], []
+  times: Counter[str] = Counter()
+  for r in map_fn(report, scenarios, [by_name[(s.route, s.car_model)] for s in scenarios], [budget] * len(scenarios)):
+    times.update(r.times)
+    if r.line is not None:
+      lines.append(r.line)
+    else:
+      gaps.append(r.gap)
+  return lines, gaps, times
 
 
 def timed_load(route: CarTestRoute) -> tuple[float, tuple[int, structs.CarParams, list] | Exception]:
@@ -235,8 +263,7 @@ def main() -> None:
   parser = argparse.ArgumentParser(description="list every test route's scenario and coverage gaps")
   parser.add_argument("--budget", type=parse_budget, default=BUDGET,
                       help="frames/s of the station's lanes for buses 0,1,2, default " + ",".join(f"{r:g}" for r in BUDGET.values()))
-  args = parser.parse_args()
-  budget = args.budget
+  budget = parser.parse_args().budget
 
   start = time.monotonic()
   times: Counter[str] = Counter()
@@ -253,18 +280,14 @@ def main() -> None:
     t = time.monotonic()
     scenarios, gaps = build_scenarios(test_routes, load=load)
     times["build_scenarios"] += time.monotonic() - t
-    by_name = {(r.route, str(r.car_model)): r for r in test_routes}
-    replayable = 0
-    for line, gap, stage_times in p.map(scenario_report, scenarios, [by_name[(s.route, s.car_model)] for s in scenarios], [budget] * len(scenarios)):
-      times.update(stage_times)
-      if gap is not None:
-        gaps.append(gap)
-        continue
-      replayable += 1
-      print(line, flush=True)
+    lines, report_gaps, report_times = run_scenarios(scenarios, test_routes, budget, p.map)
+  times.update(report_times)
+  gaps += report_gaps
+  for line in lines:
+    print(line)
 
   pair_gaps = [g for g in gaps if g.startswith("mode ")]
-  print(f"{replayable} scenarios, {len(pair_gaps)} pairs in coverage gaps")
+  print(f"{len(lines)} scenarios, {len(pair_gaps)} pairs in coverage gaps")
   for gap in gaps:
     print(gap)
   # build_scenarios is wall time in this process and includes waiting on loads, the other stages are summed over workers

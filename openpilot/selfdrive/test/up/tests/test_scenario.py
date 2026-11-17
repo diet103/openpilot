@@ -1,5 +1,6 @@
 import argparse
 import tempfile
+from functools import partial
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -7,13 +8,14 @@ from unittest import mock
 import zstandard as zstd
 
 from opendbc.car import structs
+from opendbc.car.car_helpers import interfaces
 from opendbc.car.tests.routes import CarTestRoute, routes
 from opendbc.car.tests.test_models import get_cached_segment
 from opendbc.car.toyota.values import CAR as TOYOTA
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.scenario import (Window, build_scenarios, can_span, car_params, engaged_samples, load_route, parse_budget,
-                                                  pick_window, safety_pair)
+from openpilot.selfdrive.test.up.scenario import (Scenario, Window, build_scenarios, can_span, car_params, engaged_samples, load_route, parse_budget,
+                                                  pick_window, run_scenarios, safety_pair, scenario_report)
 
 ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")
 ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")
@@ -99,7 +101,7 @@ class TestScenario(unittest.TestCase):
   def test_gap_when_no_window(self):
     scenarios, gaps = build_scenarios([ROUTE_A], fake_load({ROUTE_A.route: panda_states([False] * 40)}, {ROUTE_A.route: (3, 4)}))
     self.assertEqual(scenarios, [])
-    self.assertEqual(len(gaps), 1)
+    self.assertEqual(len(gaps), 1, gaps)
     self.assertIn("mode 3 param 4", gaps[0])
     self.assertIn("no engaged stretch", gaps[0])
 
@@ -153,6 +155,21 @@ class TestScenario(unittest.TestCase):
     for bad in ("230,130", "230,130,60,10", "230,x,60", "", "230,0,60"):
       with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
         parse_budget(bad)
+
+  def test_scenario_error_is_a_gap(self):
+    platform = str(TOYOTA.TOYOTA_COROLLA_TSS2)
+    good = interfaces[platform].get_non_essential_params(platform)
+    bad = good.copy()
+    bad.safetyConfigs[-1].safetyModel = 0xFFFF
+    routes = [CarTestRoute(f"{c}|2024-01-01--00-00-00", platform) for c in "ab"]
+    scenarios = [Scenario(r.route, 0, platform, *safety_pair(CP), Window(0., 30.), CP) for r, CP in zip(routes, (bad, good), strict=True)]
+    msgs = [can_start(i * 0.01).as_reader() for i in range(3100)]
+    report = partial(scenario_report, load=lambda route: (0, good, msgs))
+    lines, gaps, _ = run_scenarios(scenarios, routes, {0: 230., 1: 130., 2: 60.}, report=report)
+    self.assertEqual(len(gaps), 1, gaps)
+    self.assertTrue(gaps[0].startswith(f"{platform} {routes[0].route}: ValueError("), gaps)
+    self.assertEqual(len(lines), 1)
+    self.assertIn(routes[1].route, lines[0])
 
 if __name__ == "__main__":
   unittest.main()
