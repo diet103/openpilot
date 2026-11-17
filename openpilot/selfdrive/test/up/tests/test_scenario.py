@@ -171,8 +171,8 @@ class TestCachedScenarios(unittest.TestCase):
     second = cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
     self.assertEqual(self.calls, 1)
     self.assertEqual(second[1], ["gap"])
-    # the CP comes back as a reader, compare by content
-    self.assertEqual([(s.route, s.window, s.CP.to_bytes()) for s in first[0]], [(s.route, s.window, s.CP.to_bytes()) for s in second[0]])
+    # the CP comes back as a reader, compare by dict
+    self.assertEqual([(s.route, s.window, s.CP.to_dict()) for s in first[0]], [(s.route, s.window, s.CP.to_dict()) for s in second[0]])
 
   def test_cache_key_changes(self):
     cached_scenarios(self.dir, [], self.build, tree=lambda: "t1")
