@@ -84,7 +84,6 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
   safety = load_libsafety()
   if safety.set_safety_hooks(mode, param) != 0:
     raise ValueError(f"libsafety has no safety mode {mode} param {param}")
-  tick = safety.safety_tick if hasattr(safety, "safety_tick") else safety.safety_tick_current_safety_config
   heartbeat_source = _heartbeat_source(msgs)
   # the panda's own alternative experience, as it logged it before the first can message
   alt_exp = next((int(ps.alternativeExperience) for m in msgs if m.logMonoTime < first and (ps := _panda_state(m)) is not None), 0)
@@ -108,7 +107,7 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
       safety.set_timer(next_tick * 1_000_000 % 2**32)
       # the panda checks the heartbeat before its safety tick, main.c
       safety.safety_heartbeat_check()
-      tick()
+      safety.safety_tick()
       if run.rx_checks_invalid_at is None and safety.safety_a.state.safety_rx_checks_invalid:
         run.rx_checks_invalid_at = float(next_tick)
       note_controls(float(next_tick))
