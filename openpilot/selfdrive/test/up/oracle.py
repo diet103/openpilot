@@ -3,7 +3,7 @@ import bisect
 import os
 import shutil
 import tempfile
-from collections import Counter
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from functools import cache
 
@@ -20,6 +20,7 @@ PANDA_BUSES = 4
 
 @dataclass
 class SafetyRun:
+  # (sendcan t, addr, bus, panda allowed, libsafety allowed) of each command the panda echoed
   commands: list[tuple[float, int, int, bool, bool]] = field(default_factory=list)
   samples: list[tuple[float, bool, bool, int, int]] = field(default_factory=list)
   rx_rejected: list[tuple[float, int, int]] = field(default_factory=list)
@@ -96,7 +97,8 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
       run.controls_allowed.append((t, allowed))
 
   note_controls(0.)
-  pending: Counter[tuple[int, int, bytes]] = Counter()
+  # libsafety's decision on each sent command, until the panda's echo of it
+  pending: defaultdict[tuple[int, int, bytes], deque[tuple[float, bool]]] = defaultdict(deque)
   # the timer crosses its first whole second one second after the first message
   next_tick = 1
   for m in msgs:
@@ -116,9 +118,14 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
 
     if which == heartbeat_source:
       safety.safety_heartbeat(_enabled(m))
-    elif which == 'sendcan':
+    elif which == 'sendcan' and t_ns >= 0:
+      # the panda judges a command when it arrives over USB, so libsafety judges it at the sendcan, after the RX
+      # frames logged before it and before those logged after, like opendbc's replay_drive.py
+      safety.set_timer(t_ns // 1000 % 2**32)
       for c in m.sendcan:
-        pending[(c.src, c.address, bytes(c.dat))] += 1
+        if c.src < PANDA_BUSES:
+          allowed = bool(safety.safety_tx_hook(libsafety_py.make_CANPacket(c.address, c.src, c.dat)))
+          pending[(c.src, c.address, bytes(c.dat))].append((t, allowed))
     elif which == 'can':
       safety.set_timer(t_ns // 1000 % 2**32)
       for c in m.can:
@@ -126,11 +133,10 @@ def run_safety(msgs: list, mode: int, param: int) -> SafetyRun:
           bus = c.src - (BLOCKED if c.src >= BLOCKED else TX)
           key = (bus, c.address, bytes(c.dat))
           # an echo is a command only if openpilot sent it, the rest are the panda's own forwarded frames
-          if bus >= PANDA_BUSES or pending[key] == 0:
+          if bus >= PANDA_BUSES or not pending[key]:
             continue
-          pending[key] -= 1
-          allowed = bool(safety.safety_tx_hook(libsafety_py.make_CANPacket(c.address, bus, c.dat)))
-          run.commands.append((t, c.address, bus, c.src < BLOCKED, allowed))
+          sent, allowed = pending[key].popleft()
+          run.commands.append((sent, c.address, bus, c.src < BLOCKED, allowed))
         elif c.src < PANDA_BUSES:
           safety.safety_fwd_hook(c.src, c.address)
           if not safety.safety_rx_hook(libsafety_py.make_CANPacket(c.address, c.src, c.dat)):

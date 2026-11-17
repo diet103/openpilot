@@ -47,7 +47,7 @@ def command_recording(mode, commands):
     t = 0.01 + i * 0.02
     dat = bytes(length)
     msgs.append(can_msg('sendcan', t, [(addr, dat, bus)]))
-    safety.set_timer(int((t + 0.01) * 1e6))
+    safety.set_timer(int(t * 1e6))
     allowed = safety.safety_tx_hook(libsafety_py.make_CANPacket(addr, bus, dat))
     msgs.append(can_msg('can', t + 0.01, [(addr, dat, bus + (128 if allowed else 192))]))
   return msgs
@@ -147,6 +147,19 @@ class TestOracle(unittest.TestCase):
     run = run_safety(msgs, TOYOTA, TOYOTA_EPS_SCALE)
     self.assertEqual(run.controls_allowed, [(0., False), (0., True), (1., False)])
     self.assertEqual(libsafety_py.libsafety.safety_a.state.heartbeat_engaged_mismatches, 1)
+
+  def test_command_judged_at_sendcan(self):
+    # cruise drops between the command and its echo, the panda judged the command before that
+    _, dat, _ = TOYOTA_PACKER.make_can_msg("STEERING_LKA", 0, {"STEER_TORQUE_CMD": 10, "STEER_REQUEST": 1})
+    msgs = [
+      can_msg('can', 0., [pcm_cruise(1)]),
+      can_msg('sendcan', 0.01, [(0x2e4, dat, 0)]),
+      can_msg('can', 0.015, [pcm_cruise(0)]),
+      can_msg('can', 0.02, [(0x2e4, dat, 128)]),
+    ]
+    run = run_safety(msgs, TOYOTA, TOYOTA_EPS_SCALE)
+    self.assertEqual(run.controls_allowed[-1], (0.015, False))
+    self.assertEqual(run.commands, [(0.01, 0x2e4, 0, True, True)])
 
 
 if __name__ == "__main__":
