@@ -1,4 +1,6 @@
+import math
 import unittest
+from collections import Counter
 
 from opendbc.can.dbc import DBC, SignalType
 from opendbc.car.car_helpers import interfaces
@@ -8,7 +10,7 @@ from opendbc.car.toyota.values import CAR as TOYOTA, ToyotaSafetyFlags
 
 from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.test.up.oracle import load_libsafety
-from openpilot.selfdrive.test.up.replay import BUDGET, DT, _dbcs, needed_messages, over_budget, thin, validate, window_frames
+from openpilot.selfdrive.test.up.replay import BUDGET, DT, _dbcs, _values, needed_messages, over_budget, thin, validate, window_frames
 from openpilot.selfdrive.test.up.scenario import Window, load_route, safety_pair
 
 SECONDS = 20
@@ -150,22 +152,34 @@ class TestReplay(unittest.TestCase):
     frames = needed_frames(CP, frames)
     thinned = thin(CP, frames, BUDGET)
     self.assertLess(sum(len(f) for f in thinned), sum(len(f) for f in frames))
-    dbcs = _dbcs(CP)
-    checked = 0
-    for (bus, addr), name in dbcs.items():
+    # thin keeps every k-th frame of a message, k per bus
+    load = Counter(bus for f in frames for _, _, bus in f)
+    keep = {bus: max(1, math.ceil(load[bus] / (len(frames) * DT) / rate)) for bus, rate in BUDGET.items() if load[bus]}
+    checked = compared = with_counter = 0
+    for (bus, addr), name in _dbcs(CP).items():
       msg = DBC(name).addr_to_msg[addr]
       kept = [dat for f in thinned for a, dat, b in f if (b, a) == (bus, addr)]
-      if len(kept) == sum(1 for f in frames for a, _, b in f if (b, a) == (bus, addr)):
+      original = [dat for f in frames for a, dat, b in f if (b, a) == (bus, addr)]
+      if len(kept) == len(original):
         continue
+      has_counter = False
       for sig in msg.sigs.values():
         if sig.name == "COUNTER" or sig.type == SignalType.COUNTER:
           counters = [sig.get_raw_value(d) for d in kept]
           self.assertTrue(all((b - a) % (1 << sig.size) == 1 for a, b in zip(counters, counters[1:], strict=False)), (hex(addr), counters[:10]))
           checked += 1
+          has_counter = True
         if sig.calc_checksum is not None:
           self.assertTrue(all(sig.get_raw_value(d) == sig.calc_checksum(addr, sig, bytearray(d)) for d in kept), hex(addr))
           checked += 1
+      # every other signal of a kept frame keeps the value it had in the recording
+      for i, dat in enumerate(kept):
+        self.assertEqual(_values(msg, dat), _values(msg, original[i * keep[bus]]), (hex(addr), i))
+      compared += 1
+      with_counter += has_counter
     self.assertGreater(checked, 0)
+    self.assertGreater(compared, 0)
+    self.assertGreater(with_counter, 0)
 
   def test_validate_thinned_clean(self):
     CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
