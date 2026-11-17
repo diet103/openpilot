@@ -217,7 +217,7 @@ class TestReplay(unittest.TestCase):
     self.assertEqual(replay.lane_problems, replay.problems)
 
   def test_pick_replay_tries_next_route(self):
-    a, b = (Scenario(f"{c}|2024-01-01--00-00-00", 0, "CAR", 1, 2, WINDOW, 10., plain_cp()) for c in "ab")
+    a, b = (Scenario(f"{c}|2024-01-01--00-00-00", 0, "CAR", 1, 2, WINDOW, 10., 9., plain_cp()) for c in "ab")
 
     def build(over):
       def fake(CP, msgs, window, budget):
@@ -241,7 +241,7 @@ class TestReplay(unittest.TestCase):
 
 
   def test_pick_scenarios(self):
-    a, b, c = (Scenario(f"{x}|2024-01-01--00-00-00", 0, "CAR", 1, i, WINDOW, 10., plain_cp()) for i, x in enumerate("abc"))
+    a, b, c = (Scenario(f"{x}|2024-01-01--00-00-00", 0, "CAR", 1, i, WINDOW, 10., 9., plain_cp()) for i, x in enumerate("abc"))
     candidates = {(1, 0): [a], (1, 1): [b], (1, 2): [c]}
 
     def pick(cands, budget):

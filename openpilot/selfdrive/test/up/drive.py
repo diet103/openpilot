@@ -23,12 +23,12 @@ class RigProblem(Exception):
   pass
 
 
-def split_preroll(frames: list[Frame], window: Window, rise: float) -> tuple[list[Frame], list[Frame]]:
-  # the frames before the engage edge loop until openpilot is engageable, then the whole window plays once
+def split_preroll(frames: list[Frame], window: Window, preroll_end: float) -> tuple[list[Frame], list[Frame]]:
+  # the frames before the last not allowed sample loop until openpilot is engageable, then the whole window plays once
   # rounded like window_frames counts frames, a float floor drops a frame at an exact boundary
-  n = round((rise - window.start) / DT)
+  n = round((preroll_end - window.start) / DT)
   if n <= 0:
-    raise ValueError(f"no frames before the engage edge at {rise:.2f} s, window starts at {window.start:.2f} s")
+    raise ValueError(f"no frames before the preroll end at {preroll_end:.2f} s, window starts at {window.start:.2f} s")
   return frames[:n], frames
 
 
@@ -49,10 +49,34 @@ def onroad_missing(sm) -> list[str]:
   return missing
 
 
+def manager_died(rc: int) -> RuntimeError:
+  return RuntimeError(f"manager died: rc {rc}")
+
+
+def onroad_timeout(rc: int | None, panda_seen: bool, quiet_buses: set[int], missing: list[str]) -> Exception:
+  # never onroad is the rack's problem only while openpilot is still running
+  if rc is not None:
+    return manager_died(rc)
+  if not panda_seen:
+    return RigProblem("rig problem: panda not answering")
+  if quiet_buses:
+    return RigProblem(f"rig problem: no CAN on bus {sorted(quiet_buses)}")
+  return RigProblem(f"rig problem: not onroad after {ONROAD_LIMIT:g} s: {', '.join(missing)}")
+
+
+def _signal_group(pgid: int, sig: signal.Signals) -> None:
+  try:
+    os.killpg(pgid, sig)
+  except ProcessLookupError:
+    pass
+
+
 class Drive:
   def __init__(self, up):
     self.up = up
     self._manager: subprocess.Popen | None = None
+    # how long the last up.can_replay(window) took, the upload delays the window's start
+    self.replay_call_s = 0.
 
   def _up(self, call: str, *args):
     # the UP not answering is the rack's problem
@@ -69,24 +93,29 @@ class Drive:
       'TESTING_CLOSET': '1',
       'BLOCK': 'soundd',
     }
-    self._manager = subprocess.Popen(["python", os.path.join(BASEDIR, "openpilot/system/manager/manager.py")], env=env)
+    # its own process group, so stopping it leaves no processes for the next scenario
+    self._manager = subprocess.Popen(["python", os.path.join(BASEDIR, "openpilot/system/manager/manager.py")], env=env, start_new_session=True)
 
   def _stop_manager(self) -> None:
     if self._manager is None:
       return
     manager, self._manager = self._manager, None
-    manager.send_signal(signal.SIGINT)
+    rc = manager.poll()
+    _signal_group(manager.pid, signal.SIGINT)
     try:
       manager.wait(60)
     except subprocess.TimeoutExpired:
-      manager.kill()
-      manager.wait()
+      pass
+    _signal_group(manager.pid, signal.SIGKILL)
+    manager.wait()
+    if rc is not None:
+      raise manager_died(rc)
 
   def _check_manager(self) -> None:
     assert self._manager is not None
-    code = self._manager.poll()
-    if code is not None:
-      raise RuntimeError(f"manager exited with {code}")
+    rc = self._manager.poll()
+    if rc is not None:
+      raise manager_died(rc)
 
   def _wait_onroad(self, sm, can_sock, buses: set[int]) -> None:
     seen: set[int] = set()
@@ -102,43 +131,44 @@ class Drive:
       if not missing:
         break
       if time.monotonic() > end:
-        if not panda_seen:
-          raise RigProblem("rig problem: panda not answering")
-        if buses - seen:
-          raise RigProblem(f"rig problem: no CAN on bus {sorted(buses - seen)}")
-        raise RigProblem(f"rig problem: not onroad after {ONROAD_LIMIT:g} s: {', '.join(missing)}")
+        assert self._manager is not None
+        raise onroad_timeout(self._manager.poll(), panda_seen, buses - seen, missing)
     if buses - seen:
       raise RigProblem(f"rig problem: no CAN on bus {sorted(buses - seen)}")
 
   def _wait_engageable(self, sm) -> None:
     end = time.monotonic() + ENGAGEABLE_LIMIT
     while not sm['selfdriveState'].engageable:
+      self._check_manager()
       if time.monotonic() > end:
         events = [str(e.name) for e in sm['onroadEvents']]
         raise TimeoutError(f"not engageable {ENGAGEABLE_LIMIT:g} s after onroad, events: {events}")
-      self._check_manager()
       sm.update(10)
+    self._check_manager()
 
   def _record(self, window: list[Frame]) -> list:
+    # subscribed before the call, the upload can't cut the window's start
     socks = [messaging.sub_sock(s, conflate=False) for s in RECORD]
-    # the window plays once from the call, stop before it loops
-    end = time.monotonic() + LENGTH
-    self._up('can_replay', window)
-    # what came in while the UP switched over is still the preroll
     for sock in socks:
       messaging.drain_sock_raw(sock)
+    called = time.monotonic()
+    self._up('can_replay', window)
+    returned = time.monotonic()
+    self.replay_call_s = returned - called
+    print(f"up.can_replay(window) took {self.replay_call_s:.2f} s")
     msgs = []
-    while time.monotonic() < end:
+    while time.monotonic() < returned + LENGTH:
       self._check_manager()
       for sock in socks:
         msgs += messaging.drain_sock(sock)
       time.sleep(DT)
     for sock in socks:
       msgs += messaging.drain_sock(sock)
+    self._check_manager()
     return msgs
 
   def run(self, scenario: Scenario, frames: list[Frame]) -> list:
-    preroll, window = split_preroll(frames, scenario.window, scenario.rise)
+    preroll, window = split_preroll(frames, scenario.window, scenario.preroll_end)
     buses = {bus for frame in preroll for _, _, bus in frame}
     sm = messaging.SubMaster(['deviceState', 'carState', 'managerState', 'pandaStates', 'selfdriveState', 'onroadEvents'])
     can_sock = messaging.sub_sock('can', conflate=False)

@@ -36,6 +36,8 @@ class Scenario:
   window: Window
   # the panda's engage edge, in segment seconds
   rise: float
+  # the last sample not allowed before the rise, the car's engage action comes after it
+  preroll_end: float
   CP: structs.CarParams
 
 
@@ -66,11 +68,11 @@ def can_span(msgs: Iterable) -> float:
   return (max(times) - min(times)) / 1e9 if times else 0.
 
 
-def pick_window(samples: list[tuple[float, bool]], can_end: float) -> tuple[Window, float] | None:
-  # the window and its engage edge
+def pick_window(samples: list[tuple[float, bool]], can_end: float) -> tuple[Window, float, float] | None:
+  # the window, its engage edge and the last not allowed sample before the edge
   best = None
   best_len = 0.
-  # (first not allowed sample before the rise, rise) of the current stretch
+  # (first not allowed sample before the rise, rise, last not allowed sample before the rise) of the current stretch
   stretch = None
   down = None
   # a stretch starts where the panda goes from not allowed to allowed, the rack's panda starts disengaged
@@ -78,22 +80,22 @@ def pick_window(samples: list[tuple[float, bool]], can_end: float) -> tuple[Wind
   # a stretch ends at the first sample that is not engaged, or at the last sample
   for i, (t, allowed) in enumerate(samples):
     if allowed and stretch is None and down is not None:
-      stretch = (down, t)
+      stretch = (down, t, samples[i - 1][0])
     if not allowed and (i == 0 or samples[i - 1][1]):
       down = t
     last = i == len(samples) - 1
     if stretch is not None and (not allowed or last):
-      before, rise = stretch
+      before, rise, preroll_end = stretch
       length = (can_end if allowed else t) - rise
       # the window starts where the panda is not allowed, after any earlier stretch
       start = max(0., before, min(rise - LEAD, can_end - LENGTH))
       if length >= MIN_ENGAGED and length > best_len and start + LENGTH <= can_end:
-        best, best_len = (start, rise), length
+        best, best_len = (start, rise, preroll_end), length
       stretch = None
   if best is None:
     return None
-  start, rise = best
-  return Window(start, start + LENGTH), rise
+  start, rise, preroll_end = best
+  return Window(start, start + LENGTH), rise, preroll_end
 
 
 def safety_pair(CP: structs.CarParams) -> tuple[int, int]:
@@ -161,8 +163,9 @@ def build_candidates(routes, load: Callable[[CarTestRoute], tuple[int, structs.C
       continue
     picked = pick_window(samples, span)
     if picked is not None:
-      window, rise = picked
-      scenarios.setdefault(mode_param, []).append(Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, rise, CP))
+      window, rise, preroll_end = picked
+      scenario = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, rise, preroll_end, CP)
+      scenarios.setdefault(mode_param, []).append(scenario)
     elif samples[0][1]:
       engaged_from_start.add(mode_param)
 
