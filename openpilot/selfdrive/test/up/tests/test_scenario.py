@@ -5,10 +5,11 @@ from unittest import mock
 
 import zstandard as zstd
 
+from opendbc.car import structs
 from opendbc.car.tests.routes import CarTestRoute
 
 from openpilot.cereal.messaging import new_message
-from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, can_span, engaged_samples, load_route, pick_window
+from openpilot.selfdrive.test.up.scenario import Window, build_scenarios, can_span, engaged_samples, load_route, pick_window, safety_pair
 
 ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")
 ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")
@@ -34,12 +35,20 @@ def panda_states(allowed_by_second, start=0., can_at=0.):
   return msgs
 
 
+def car_params(mode, param):
+  CP = structs.CarParams()
+  cfg = structs.CarParams.SafetyConfig()
+  cfg.safetyModel, cfg.safetyParam = mode, param
+  CP.safetyConfigs = [cfg]
+  return CP
+
+
 def fake_load(by_route, pairs=None):
   def load(route):
     item = by_route[route.route]
     if isinstance(item, Exception):
       raise item
-    return 2, (pairs or {}).get(route.route, (1, 2)), item
+    return 2, car_params(*(pairs or {}).get(route.route, (1, 2))), item
   return load
 
 
@@ -66,6 +75,7 @@ class TestScenario(unittest.TestCase):
     self.assertEqual(scenarios[0].route, ROUTE_A.route)
     self.assertEqual(scenarios[0].car_model, "CAR_A")
     self.assertEqual((scenarios[0].mode, scenarios[0].param), (1, 2))
+    self.assertEqual(safety_pair(scenarios[0].CP), (1, 2))
     self.assertEqual(scenarios[0].window, Window(5., 35.))
     self.assertEqual(gaps, [])
 
@@ -104,8 +114,8 @@ class TestScenario(unittest.TestCase):
       path = Path(tmp) / "0123.zst&sig=abc%3D"
       path.write_bytes(zstd.compress(b"".join(m.to_bytes() for m in msgs)))
       with mock.patch("openpilot.selfdrive.test.up.scenario.get_cached_segment", return_value=path):
-        segment, pair, loaded = load_route(CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A", 0), pair=lambda r, p: (1, 2))
-    self.assertEqual((segment, pair), (0, (1, 2)))
+        segment, CP, loaded = load_route(CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A", 0), params=lambda r, p: car_params(1, 2))
+    self.assertEqual((segment, safety_pair(CP)), (0, (1, 2)))
     self.assertEqual([m.logMonoTime for m in loaded], [int(1e9), int(2e9)])
 
 

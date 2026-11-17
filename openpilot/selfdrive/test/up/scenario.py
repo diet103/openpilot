@@ -7,6 +7,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+from opendbc.car import structs
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.logreader import LogReader as OpendbcLogReader
 from opendbc.car.tests.routes import CarTestRoute, routes as test_routes
@@ -33,6 +34,7 @@ class Scenario:
   mode: int
   param: int
   window: Window
+  CP: structs.CarParams
 
 
 def engaged_samples(msgs: Iterable) -> list[tuple[float, bool]]:
@@ -82,15 +84,18 @@ def pick_window(samples: list[tuple[float, bool]], can_end: float) -> Window | N
   return Window(start, start + LENGTH)
 
 
-def safety_pair(route: CarTestRoute, path: Path) -> tuple[int, int]:
-  cls = type("R", (TestCarModelBase,), {"test_route": route, "platform": route.car_model})
-  car_fw, _, alpha_long = cls.get_testing_data_from_logreader(OpendbcLogReader(str(path), only_union_types=True, sort_by_time=True))
-  CP = interfaces[cls.platform].get_params(cls.platform, cls.fingerprint, car_fw, alpha_long, False, docs=False)
+def safety_pair(CP: structs.CarParams) -> tuple[int, int]:
   cfg = CP.safetyConfigs[-1]
   return int(cfg.safetyModel.raw), int(cfg.safetyParam)
 
 
-def load_route(route: CarTestRoute, pair: Callable[[CarTestRoute, Path], tuple[int, int]] = safety_pair) -> tuple[int, tuple[int, int], list]:
+def car_params(route: CarTestRoute, path: Path) -> structs.CarParams:
+  cls = type("R", (TestCarModelBase,), {"test_route": route, "platform": route.car_model})
+  car_fw, _, alpha_long = cls.get_testing_data_from_logreader(OpendbcLogReader(str(path), only_union_types=True, sort_by_time=True))
+  return interfaces[cls.platform].get_params(cls.platform, cls.fingerprint, car_fw, alpha_long, False, docs=False)
+
+
+def load_route(route: CarTestRoute, params: Callable[[CarTestRoute, Path], structs.CarParams] = car_params) -> tuple[int, structs.CarParams, list]:
   segments = (2, 1, 0) if route.segment is None else (route.segment,)
   errors = []
   for segment in segments:
@@ -102,24 +107,25 @@ def load_route(route: CarTestRoute, pair: Callable[[CarTestRoute, Path], tuple[i
       errors.append(f"segment {segment}: {e!r}")
       continue
     try:
-      return segment, pair(route, path), msgs
+      return segment, params(route, path), msgs
     except Exception as e:
       errors.append(f"segment {segment}: can't derive safety config: {e!r}")
   raise OSError("; ".join(errors))
 
 
-def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, tuple[int, int], list]] = load_route) -> tuple[list[Scenario], list[str]]:
+def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.CarParams, list]] = load_route) -> tuple[list[Scenario], list[str]]:
   scenarios: dict[tuple[int, int], Scenario] = {}
   seen_pairs: set[tuple[int, int]] = set()
   gaps = []
   for route in routes:
     who = f"{route.car_model} {route.route}"
     try:
-      segment, mode_param, msgs = load(route)
+      segment, CP, msgs = load(route)
     except Exception as e:
       gaps.append(f"{who}: can't load ({e})")
       continue
 
+    mode_param = safety_pair(CP)
     span = can_span(msgs)
     if span < LENGTH:
       gaps.append(f"{who}: segment shorter than {LENGTH:g} s")
@@ -134,7 +140,7 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, tuple[int,
       continue
     window = pick_window(samples, span)
     if window is not None:
-      scenarios[mode_param] = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window)
+      scenarios[mode_param] = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, CP)
 
   for mode, param in sorted(seen_pairs - scenarios.keys()):
     gaps.append(f"mode {mode} param {param}: no engaged stretch of {MIN_ENGAGED:g} s in any route")
@@ -149,11 +155,11 @@ def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, f
   s = scenario
   _, _, msgs = load_route(route._replace(segment=s.segment))
   frames = window_frames(msgs, s.window)
-  needed = needed_messages(s.car_model, s.mode, s.param, frames)
+  needed = needed_messages(s.CP, frames)
   frames = thin([[f for f in frame if (f[2], f[0]) in needed] for frame in frames], budget)
   seconds = len(frames) * DT
   rates = " ".join(f"{bus}:{sum(b == bus for f in frames for _, _, b in f) / seconds:.0f}" for bus in sorted(budget))
-  problems = validate(s.car_model, s.mode, s.param, frames)
+  problems = validate(s.CP, frames)
 
   # the oracle sees the same window of the recording, in the same time base
   first = min(m.logMonoTime for m in msgs if m.which() == 'can')

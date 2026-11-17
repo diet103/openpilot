@@ -3,13 +3,14 @@ from collections import Counter
 from collections.abc import Iterable
 
 from opendbc.can.parser import MAX_BAD_COUNTER
+from opendbc.car import structs
 from opendbc.car.can_definitions import CanData
 from opendbc.car.car_helpers import interfaces
 
 from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.pandad import can_capnp_to_list
 from openpilot.selfdrive.test.up.oracle import PANDA_BUSES, load_libsafety, run_safety
-from openpilot.selfdrive.test.up.scenario import Window
+from openpilot.selfdrive.test.up.scenario import Window, safety_pair
 
 # the UP's can_replay frame period
 DT = 0.01
@@ -41,9 +42,8 @@ def window_frames(msgs: Iterable, window: Window) -> list[Frame]:
   return frames
 
 
-def _parsers(platform: str) -> list:
-  interface = interfaces[platform]
-  CP = interface.get_non_essential_params(platform)
+def _parsers(CP: structs.CarParams) -> list:
+  interface = interfaces[CP.carFingerprint]
   car = interface(CP)
   radar = interface.RadarInterface(CP)
   return [car, radar]
@@ -53,8 +53,8 @@ def _packets(frames: list[Frame]) -> list[tuple[int, list[CanData]]]:
   return [(round(i * DT * 1e9), [CanData(a, d, b) for a, d, b in f]) for i, f in enumerate(frames)]
 
 
-def needed_messages(platform: str, mode: int, param: int, frames: list[Frame]) -> set[tuple[int, int]]:
-  car, radar = _parsers(platform)
+def needed_messages(CP: structs.CarParams, frames: list[Frame]) -> set[tuple[int, int]]:
+  car, radar = _parsers(CP)
   for packet in _packets(frames):
     car.update([packet])
     radar.update([packet])
@@ -64,6 +64,7 @@ def needed_messages(platform: str, mode: int, param: int, frames: list[Frame]) -
     parsers.append(radar.rcp)
   needed = {(p.bus, addr) for p in parsers for addr in p.message_states}
 
+  mode, param = safety_pair(CP)
   safety = load_libsafety()
   if safety.set_safety_hooks(mode, param) != 0:
     raise ValueError(f"libsafety has no safety mode {mode} param {param}")
@@ -90,7 +91,7 @@ def thin(frames: list[Frame], budget: dict[int, float]) -> list[Frame]:
   return out
 
 
-def validate(platform: str, mode: int, param: int, frames: list[Frame]) -> list[str]:
+def validate(CP: structs.CarParams, frames: list[Frame]) -> list[str]:
   problems = []
   msgs = []
   for i, frame in enumerate(frames):
@@ -99,12 +100,12 @@ def validate(platform: str, mode: int, param: int, frames: list[Frame]) -> list[
     for c, (addr, dat, bus) in zip(msg.can, frame, strict=True):
       c.address, c.dat, c.src = addr, dat, bus
     msgs.append(msg)
-  run = run_safety(msgs, mode, param)
+  run = run_safety(msgs, *safety_pair(CP))
   problems += sorted({f"panda rejects 0x{addr:x} bus {bus}" for _, addr, bus in run.rx_rejected})
   if run.rx_checks_invalid_at is not None and run.rx_checks_invalid_at > STARTUP:
     problems.append("panda RX checks invalid")
 
-  car, radar = _parsers(platform)
+  car, radar = _parsers(CP)
   can_valid = True
   radar_errors: set[str] = set()
   radar_seen = False

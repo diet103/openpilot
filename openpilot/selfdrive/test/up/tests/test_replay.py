@@ -6,7 +6,7 @@ from opendbc.car.toyota.values import CAR as TOYOTA, ToyotaSafetyFlags
 from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.test.up.oracle import load_libsafety
 from openpilot.selfdrive.test.up.replay import DT, needed_messages, thin, validate, window_frames
-from openpilot.selfdrive.test.up.scenario import Window, load_route
+from openpilot.selfdrive.test.up.scenario import Window, load_route, safety_pair
 
 SECONDS = 20
 
@@ -44,10 +44,16 @@ def rx_checks(mode, param):
 def route_frames(car):
   route = next(r for r in routes if r.car_model == car)
   try:
-    _, (mode, param), msgs = load_route(route)
+    _, CP, msgs = load_route(route)
   except OSError as e:
     raise unittest.SkipTest(f"{route.route} not cached: {e}") from e
-  return str(car), mode, param, window_frames(msgs, Window(5., 5. + SECONDS))
+  return CP, window_frames(msgs, Window(5., 5. + SECONDS))
+
+
+def with_param(CP, param):
+  CP = CP.copy()
+  CP.safetyConfigs[-1].safetyParam = int(param)
+  return CP
 
 
 class TestReplay(unittest.TestCase):
@@ -72,41 +78,44 @@ class TestReplay(unittest.TestCase):
     self.assertEqual(frames, [[(0x10, b'a', 0)], [(0x10, b'd', 1)]])
 
   def test_needed_includes_safety_rx_checks(self):
-    car, mode, param, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
-    self.assertLessEqual(rx_checks(mode, param), needed_messages(car, mode, param, frames))
+    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    self.assertLessEqual(rx_checks(*safety_pair(CP)), needed_messages(CP, frames))
 
   def test_needed_follows_param(self):
-    car, mode, param, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    mode, param = safety_pair(CP)
     plain, alt = param & ~ToyotaSafetyFlags.ALT_BRAKE, param | ToyotaSafetyFlags.ALT_BRAKE
-    needed_plain = needed_messages(car, mode, plain, frames)
-    needed_alt = needed_messages(car, mode, alt, frames)
+    needed_plain = needed_messages(with_param(CP, plain), frames)
+    needed_alt = needed_messages(with_param(CP, alt), frames)
     self.assertLessEqual(rx_checks(mode, plain), needed_plain)
     self.assertLessEqual(rx_checks(mode, alt), needed_alt)
     self.assertNotEqual(needed_plain, needed_alt)
     self.assertEqual({addr for _, addr in needed_plain ^ needed_alt}, {0x224})
 
   def test_needed_rejects_bad_safety_mode(self):
-    car, mode, param, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    CP = with_param(CP, 0)
+    CP.safetyConfigs[-1].safetyModel = 0xFFFF
     with self.assertRaises(ValueError):
-      needed_messages(car, 0xFFFF, 0, frames)
+      needed_messages(CP, frames)
 
   def test_validate_flags_starved_message(self):
-    car, mode, param, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
-    problems = validate(car, mode, param, thin(frames, {0: 5.}))
+    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    problems = validate(CP, thin(frames, {0: 5.}))
     self.assertTrue(any("panda" in p or "can't parse" in p for p in problems), problems)
 
   def test_validate_flags_starved_radar(self):
-    car, mode, param, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
     frames = [[m for m in frame if m[2] != 1] for frame in frames]
-    problems = validate(car, mode, param, frames)
+    problems = validate(CP, frames)
     self.assertTrue(any(p.startswith("openpilot radar errors") for p in problems), problems)
 
   def test_validate_clean(self):
-    car, mode, param, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
-    self.assertEqual(validate(car, mode, param, frames), [])
-    needed = needed_messages(car, mode, param, frames)
+    CP, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    self.assertEqual(validate(CP, frames), [])
+    needed = needed_messages(CP, frames)
     frames = [[f for f in frame if (f[2], f[0]) in needed] for frame in frames]
-    self.assertEqual(validate(car, mode, param, frames), [])
+    self.assertEqual(validate(CP, frames), [])
 
 
 if __name__ == "__main__":
