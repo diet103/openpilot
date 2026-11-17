@@ -123,8 +123,10 @@ def load_route(route: CarTestRoute, params: Callable[[CarTestRoute, Path], struc
   raise OSError("; ".join(errors))
 
 
-def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.CarParams, list]] = load_route) -> tuple[list[Scenario], list[str]]:
-  scenarios: dict[tuple[int, int], Scenario] = {}
+def build_candidates(routes, load: Callable[[CarTestRoute], tuple[int, structs.CarParams, list]] = load_route) \
+    -> tuple[dict[tuple[int, int], list[Scenario]], list[str]]:
+  # every route's scenario per pair, in routes order, so a pair can fall back to its next route
+  scenarios: dict[tuple[int, int], list[Scenario]] = {}
   seen_pairs: set[tuple[int, int]] = set()
   engaged_from_start: set[tuple[int, int]] = set()
   gaps = []
@@ -142,8 +144,6 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.Ca
       gaps.append(f"{who}: segment shorter than {LENGTH:g} s")
       continue
     seen_pairs.add(mode_param)
-    if mode_param in scenarios:
-      continue
 
     samples = engaged_samples(msgs)
     if not samples:
@@ -151,7 +151,7 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.Ca
       continue
     window = pick_window(samples, span)
     if window is not None:
-      scenarios[mode_param] = Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, CP)
+      scenarios.setdefault(mode_param, []).append(Scenario(route.route, segment, str(route.car_model), mode_param[0], mode_param[1], window, CP))
     elif samples[0][1]:
       engaged_from_start.add(mode_param)
 
@@ -160,7 +160,12 @@ def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.Ca
       gaps.append(f"mode {mode} param {param}: no engage edge in segment")
     else:
       gaps.append(f"mode {mode} param {param}: no engaged stretch of {MIN_ENGAGED:g} s in any route")
-  return list(scenarios.values()), gaps
+  return scenarios, gaps
+
+
+def build_scenarios(routes, load: Callable[[CarTestRoute], tuple[int, structs.CarParams, list]] = load_route) -> tuple[list[Scenario], list[str]]:
+  candidates, gaps = build_candidates(routes, load)
+  return [c[0] for c in candidates.values()], gaps
 
 
 @dataclass
@@ -169,6 +174,8 @@ class Report:
   line: str | None
   gap: str | None
   times: Counter[str]
+  # the pair's next route may still fit the lanes
+  retry: bool = False
 
 
 def scenario_report(scenario: Scenario, route: CarTestRoute, budget: dict[int, float],
@@ -204,7 +211,7 @@ def _scenario_report(s: Scenario, route: CarTestRoute, budget: dict[int, float],
   lane_problems = over_budget(frames, budget) or (problems if problems and not validate(s.CP, needed_frames) else [])
   times["validate"] += time.monotonic() - t
   if lane_problems:
-    return Report(None, f"mode {s.mode} param {s.param}: lane budget: {', '.join(lane_problems)}", times)
+    return Report(None, f"mode {s.mode} param {s.param}: lane budget: {', '.join(lane_problems)}", times, retry=True)
 
   t = time.monotonic()
   # the oracle sees the same window of the recording, in the same time base
@@ -219,17 +226,26 @@ def _scenario_report(s: Scenario, route: CarTestRoute, budget: dict[int, float],
   return Report(f"{where} frames/s {rates} {checks}", None, times)
 
 
-def run_scenarios(scenarios: list[Scenario], routes: list[CarTestRoute], budget: dict[int, float],
+def run_scenarios(candidates: dict[tuple[int, int], list[Scenario]], routes: list[CarTestRoute], budget: dict[int, float],
                   map_fn: Callable = map, report: Callable[..., Report] = scenario_report) -> tuple[list[str], list[str], Counter[str]]:
   by_name = {(r.route, str(r.car_model)): r for r in routes}
   lines, gaps = [], []
   times: Counter[str] = Counter()
-  for r in map_fn(report, scenarios, [by_name[(s.route, s.car_model)] for s in scenarios], [budget] * len(scenarios)):
-    times.update(r.times)
-    if r.line is not None:
-      lines.append(r.line)
-    else:
-      gaps.append(r.gap)
+  # each round tries every open pair's next route, a pair gets the gap of its last route only when none fits
+  tries = dict.fromkeys(candidates, 0)
+  while tries:
+    todo = [(pair, candidates[pair][i]) for pair, i in tries.items()]
+    results = map_fn(report, [s for _, s in todo], [by_name[(s.route, s.car_model)] for _, s in todo], [budget] * len(todo))
+    next_tries = {}
+    for (pair, _), r in zip(todo, results, strict=True):
+      times.update(r.times)
+      if r.line is not None:
+        lines.append(r.line)
+      elif r.retry and tries[pair] + 1 < len(candidates[pair]):
+        next_tries[pair] = tries[pair] + 1
+      else:
+        gaps.append(r.gap)
+    tries = next_tries
   return lines, gaps, times
 
 
@@ -278,9 +294,9 @@ def main() -> None:
   with pool() as p:
     loads = deque(p.submit(timed_load, r) for r in test_routes)
     t = time.monotonic()
-    scenarios, gaps = build_scenarios(test_routes, load=load)
+    candidates, gaps = build_candidates(test_routes, load=load)
     times["build_scenarios"] += time.monotonic() - t
-    lines, report_gaps, report_times = run_scenarios(scenarios, test_routes, budget, p.map)
+    lines, report_gaps, report_times = run_scenarios(candidates, test_routes, budget, p.map)
   times.update(report_times)
   gaps += report_gaps
   for line in lines:
@@ -290,7 +306,7 @@ def main() -> None:
   print(f"{len(lines)} scenarios, {len(pair_gaps)} pairs in coverage gaps")
   for gap in gaps:
     print(gap)
-  # build_scenarios is wall time in this process and includes waiting on loads, the other stages are summed over workers
+  # build_scenarios (build_candidates) is wall time in this process and includes waiting on loads, the other stages are summed over workers
   stages = ", ".join(f"{name} {times[name]:.1f} s" for name in ("load", "build_scenarios", "frames", "validate", "oracle"))
   print(f"timing: {WORKERS} workers, run {time.monotonic() - start:.1f} s, {stages}")
 
