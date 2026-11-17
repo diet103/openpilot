@@ -14,8 +14,8 @@ from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.test.up.scenario import (Scenario, Window, build_candidates, build_scenarios, cached_scenarios, can_span, car_params,
                                                   engaged_samples, load_log, load_route, pick_window, safety_pair)
 
-ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")
-ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")
+ROUTE_A = CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A")  # ty: ignore[invalid-argument-type]
+ROUTE_B = CarTestRoute("bbbb|2024-01-01--00-00-00", "CAR_B")  # ty: ignore[invalid-argument-type]
 
 
 def samples(*stretches, end=70):
@@ -139,7 +139,7 @@ class TestScenario(unittest.TestCase):
       path = Path(tmp) / "0123.zst&sig=abc%3D"
       path.write_bytes(zstd.compress(b"".join(m.to_bytes() for m in msgs)))
       with mock.patch("openpilot.selfdrive.test.up.scenario.get_cached_segment", return_value=path):
-        segment, CP, loaded = load_route(CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A", 0), params=lambda r, p: fake_car_params(1, 2))
+        segment, CP, loaded = load_route(CarTestRoute("aaaa|2024-01-01--00-00-00", "CAR_A", 0), params=lambda r, p: fake_car_params(1, 2))  # ty: ignore[invalid-argument-type]
         logged = load_log(Scenario("aaaa|2024-01-01--00-00-00", 0, "CAR_A", 1, 2, Window(0., 30.), 5., CP))
     self.assertEqual((segment, safety_pair(CP)), (0, (1, 2)))
     self.assertEqual([m.logMonoTime for m in loaded], [int(1e9), int(2e9)])

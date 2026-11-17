@@ -159,7 +159,7 @@ def thin(CP: structs.CarParams, frames: list[Frame], budget: dict[int, float]) -
       if n % k:
         continue
       # a kept frame skips k - 1 counter steps, repack it so the counter and checksum stay consecutive
-      if k > 1 and msg is not None and _checked(msg):
+      if k > 1 and msg is not None and dbc is not None and _checked(msg):
         packer = packers.setdefault((bus, dbc), CANPacker(dbc))
         addr, dat, bus = packer.make_can_msg(addr, bus, _values(msg, dat))
       kept.append((addr, dat, bus))

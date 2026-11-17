@@ -2,7 +2,7 @@ import argparse
 import multiprocessing
 import os
 import time
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -22,11 +22,11 @@ class Report:
   # a scenario line, or the coverage gap it became
   line: str | None
   gap: str | None
-  times: Counter[str]
+  times: defaultdict[str, float]
 
 
 def pair_report(candidates: list[Scenario], budget: dict[int, float], load: Callable[[Scenario], list] = load_log) -> Report:
-  times: Counter[str] = Counter()
+  times: defaultdict[str, float] = defaultdict(float)
   tried: list[Scenario] = []
   try:
     return _pair_report(candidates, budget, load, times, tried)
@@ -41,7 +41,7 @@ def _rates(frames: list[Frame], budget: dict[int, float]) -> str:
 
 
 def _pair_report(candidates: list[Scenario], budget: dict[int, float], load: Callable[[Scenario], list],
-                 times: Counter[str], tried: list[Scenario]) -> Report:
+                 times: defaultdict[str, float], tried: list[Scenario]) -> Report:
   def timed_load(s: Scenario) -> list:
     tried.append(s)
     t = time.monotonic()
@@ -70,12 +70,13 @@ def _pair_report(candidates: list[Scenario], budget: dict[int, float], load: Cal
 
 
 def run_scenarios(candidates: dict[tuple[int, int], list[Scenario]], budget: dict[int, float],
-                  map_fn: Callable = map, report: Callable[..., Report] = pair_report) -> tuple[list[str], list[str], Counter[str]]:
+                  map_fn: Callable = map, report: Callable[..., Report] = pair_report) -> tuple[list[str], list[str], defaultdict[str, float]]:
   pairs = list(candidates.values())
   lines, gaps = [], []
-  times: Counter[str] = Counter()
+  times: defaultdict[str, float] = defaultdict(float)
   for r in map_fn(report, pairs, [budget] * len(pairs)):
-    times.update(r.times)
+    for stage, seconds in r.times.items():
+      times[stage] += seconds
     if r.line is not None:
       lines.append(r.line)
     else:
@@ -114,7 +115,7 @@ def main() -> None:
   budget = parser.parse_args().budget
 
   start = time.monotonic()
-  times: Counter[str] = Counter()
+  times: defaultdict[str, float] = defaultdict(float)
 
   def load(_: CarTestRoute) -> tuple[int, structs.CarParams, list]:
     seconds, loaded = loads.popleft().result()
@@ -129,7 +130,8 @@ def main() -> None:
     candidates, gaps = build_candidates(test_routes, load=load)
     times["build_scenarios"] += time.monotonic() - t
     lines, report_gaps, report_times = run_scenarios(candidates, budget, p.map)
-  times.update(report_times)
+  for stage, seconds in report_times.items():
+    times[stage] += seconds
   gaps += report_gaps
   for line in lines:
     print(line)
