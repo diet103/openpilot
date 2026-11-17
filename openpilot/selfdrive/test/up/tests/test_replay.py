@@ -85,6 +85,11 @@ class TestReplay(unittest.TestCase):
     self.assertNotEqual(needed_plain, needed_alt)
     self.assertEqual({addr for _, addr in needed_plain ^ needed_alt}, {0x224})
 
+  def test_needed_rejects_bad_safety_mode(self):
+    car, mode, param, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
+    with self.assertRaises(ValueError):
+      needed_messages(car, 0xFFFF, 0, frames)
+
   def test_validate_flags_starved_message(self):
     car, mode, param, frames = route_frames(TOYOTA.TOYOTA_COROLLA_TSS2)
     problems = validate(car, mode, param, thin(frames, {0: 5.}))

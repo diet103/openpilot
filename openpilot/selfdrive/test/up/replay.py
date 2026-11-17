@@ -65,10 +65,11 @@ def needed_messages(platform: str, mode: int, param: int, frames: list[Frame]) -
   needed = {(p.bus, addr) for p in parsers for addr in p.message_states}
 
   safety = load_libsafety()
-  if safety.set_safety_hooks(mode, param) == 0:
-    cfg = safety.safety_a.setup.current_safety_config
-    needed |= {(cfg.rx_checks[i].msg[j].bus, cfg.rx_checks[i].msg[j].addr) for i in range(cfg.rx_checks_len) for j in range(len(cfg.rx_checks[i].msg))
-               if cfg.rx_checks[i].msg[j].addr}
+  if safety.set_safety_hooks(mode, param) != 0:
+    raise ValueError(f"libsafety has no safety mode {mode} param {param}")
+  cfg = safety.safety_a.setup.current_safety_config
+  for i in range(cfg.rx_checks_len):
+    needed |= {(m.bus, m.addr) for m in cfg.rx_checks[i].msg if m.addr}
   return needed
 
 
