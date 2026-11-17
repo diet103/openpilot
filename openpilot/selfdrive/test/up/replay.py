@@ -8,7 +8,7 @@ from opendbc.car.car_helpers import interfaces
 
 from openpilot.cereal.messaging import new_message
 from openpilot.selfdrive.pandad import can_capnp_to_list
-from openpilot.selfdrive.test.up.oracle import load_libsafety, run_safety
+from openpilot.selfdrive.test.up.oracle import PANDA_BUSES, load_libsafety, run_safety
 from openpilot.selfdrive.test.up.scenario import Window
 
 # the UP's can_replay frame period
@@ -17,10 +17,6 @@ DT = 0.01
 Frame = list[tuple[int, bytes, int]]
 # the first seconds are for the parsers to learn rates and the panda's RX checks to fill
 STARTUP = 2.
-# the panda marks what it sent with src + 128 and what it blocked with src + 192
-TX = 128
-BUSES = 3
-PANDA_BUSES = 4
 
 
 def _bytes(msg) -> bytes:
@@ -39,8 +35,9 @@ def window_frames(msgs: Iterable, window: Window) -> list[Frame]:
     if not 0 <= i < len(frames):
       continue
     for addr, dat, src in can:
-      if src < TX and src % PANDA_BUSES < BUSES:
-        frames[i].append((addr, dat, src % PANDA_BUSES))
+      # the first panda's buses 0-2, not its tx echoes (src + 128) or another panda's buses (src + 4)
+      if src < PANDA_BUSES - 1:
+        frames[i].append((addr, dat, src))
   return frames
 
 
@@ -56,7 +53,7 @@ def _packets(frames: list[Frame]) -> list[tuple[int, list[CanData]]]:
   return [(round(i * DT * 1e9), [CanData(a, d, b) for a, d, b in f]) for i, f in enumerate(frames)]
 
 
-def needed_messages(platform: str, frames: list[Frame]) -> set[tuple[int, int]]:
+def needed_messages(platform: str, mode: int, param: int, frames: list[Frame]) -> set[tuple[int, int]]:
   car, radar = _parsers(platform)
   for packet in _packets(frames):
     car.update([packet])
@@ -67,18 +64,12 @@ def needed_messages(platform: str, frames: list[Frame]) -> set[tuple[int, int]]:
     parsers.append(radar.rcp)
   needed = {(p.bus, addr) for p in parsers for addr in p.message_states}
 
-  mode, param = _safety_pair(platform)
   safety = load_libsafety()
   if safety.set_safety_hooks(mode, param) == 0:
     cfg = safety.safety_a.setup.current_safety_config
     needed |= {(cfg.rx_checks[i].msg[j].bus, cfg.rx_checks[i].msg[j].addr) for i in range(cfg.rx_checks_len) for j in range(len(cfg.rx_checks[i].msg))
                if cfg.rx_checks[i].msg[j].addr}
   return needed
-
-
-def _safety_pair(platform: str) -> tuple[int, int]:
-  cfg = interfaces[platform].get_non_essential_params(platform).safetyConfigs[-1]
-  return int(cfg.safetyModel.raw), int(cfg.safetyParam)
 
 
 def thin(frames: list[Frame], budget: dict[int, float]) -> list[Frame]:
@@ -112,14 +103,25 @@ def validate(platform: str, mode: int, param: int, frames: list[Frame]) -> list[
   if run.rx_checks_invalid_at is not None and run.rx_checks_invalid_at > STARTUP:
     problems.append("panda RX checks invalid")
 
-  car = _parsers(platform)[0]
+  car, radar = _parsers(platform)
   can_valid = True
+  radar_errors: set[str] = set()
+  radar_seen = False
   for i, packet in enumerate(_packets(frames)):
     state = car.update([packet])
+    data = radar.update([packet])
     if i * DT > STARTUP:
       can_valid = can_valid and state.canValid
+      if data is not None:
+        radar_seen = True
+        radar_errors |= {name for name in data.errors.schema.fieldnames if getattr(data.errors, name)}
   if not can_valid:
     problems.append(f"openpilot can't parse: {_invalid(car)}")
+  # a radar that reads CAN publishes nothing once its trigger message is gone
+  if radar.rcp is not None and not radar_seen:
+    radar_errors.add("no radar data")
+  if radar_errors:
+    problems.append(f"openpilot radar errors: {sorted(radar_errors)}")
   return problems
 
 
